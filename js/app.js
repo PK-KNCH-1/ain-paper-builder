@@ -191,7 +191,7 @@
       '<nav class="nav" aria-label="Main">' +
       '<a href="#/" data-nav="home">Mentees</a>' +
       '<a href="#/bank" data-nav="bank"><span class="nl">Question bank</span><span class="ns">Bank</span></a>' +
-      '<a href="#/import" data-nav="import"><span class="nl">Paste questions</span><span class="ns">Paste</span></a>' +
+      '<a href="#/import" data-nav="import"><span class="nl">Add from PDF</span><span class="ns">PDF</span></a>' +
       (isAdmin() ? '<a href="#/admin" data-nav="admin">Admin</a>' : '') +
       '</nav>' +
       '<a class="who" href="#/account" title="Your account"><span class="avatar">' + esc(initials(S.me.full_name || S.me.email)) + '</span><span class="who-name">' + esc(S.me.full_name || S.me.email) + '</span></a>' +
@@ -389,7 +389,7 @@
       '<div class="page-head"><div><h1>Mentees</h1><p class="sub">Choose a mentee to make a new paper, print it, or mark their answers.</p></div>' +
       '<div class="row">' + (isAdmin() ? '<select id="mentorFilter" aria-label="Show mentees of"><option value="all">All mentors</option>' + mentorIds.map((id) => '<option value="' + id + '"' + (S.homeMentor === id ? ' selected' : '') + '>' + esc(id === S.me.id ? 'Your mentees' : personName(id)) + '</option>').join('') + '</select>' : '') +
       '<button class="btn primary" data-act="add-mentee">Add mentee</button></div></div>' +
-      '<div class="stat-strip"><span>Question bank: <b>' + active.length + '</b> questions' + (samples ? ' (' + samples + ' samples)' : '') + '</span><a href="#/bank">Open bank</a><a href="#/q/new">Add a question</a></div>' +
+      '<div class="stat-strip"><span>Question bank: <b>' + active.length + '</b> questions' + (samples ? ' (' + samples + ' samples)' : '') + '</span><a href="#/bank">Open bank</a><a href="#/q/new">Add a question</a><a href="#/import">Add from a PDF</a></div>' +
       '<form class="panel" id="menteeForm" hidden novalidate style="margin-bottom:16px"><h2 style="margin-bottom:12px">New mentee</h2><div class="form-grid">' +
       '<label class="field">Name<input id="mfName" type="text" required maxlength="120"></label>' +
       '<label class="field">Target NEET year<input id="mfYear" type="number" min="2025" max="2035" value="' + (new Date().getFullYear() + 1) + '"></label>' +
@@ -898,7 +898,7 @@
     const pageSize = 25;
     main().innerHTML =
       '<div class="page-head"><div><h1>Question bank</h1><p class="sub">Shared by everyone at ' + esc(orgName()) + '. Archived questions stay on old papers but are left out of new ones.</p></div>' +
-      '<div class="row"><a class="btn" href="#/import">Paste many</a><a class="btn primary" href="#/q/new">Add question</a></div></div>' +
+      '<div class="row"><a class="btn" href="#/import">Add from PDF</a><a class="btn primary" href="#/q/new">Add question</a></div></div>' +
       '<div id="sampleNote"></div>' +
       '<div class="panel" style="margin-bottom:14px"><div class="filters">' +
       '<label class="field">Subject<select id="fSubject"><option value="">All subjects</option>' + subjectOptions(f.subject) + '</select></label>' +
@@ -1122,73 +1122,169 @@
     preview();
   }
 
-  /* ================= Paste many ================= */
+  /* ================= Add from PDF or text ================= */
+
+  let pdfjsPromise = null;
+  function loadPdfJs() {
+    if (!pdfjsPromise) {
+      const base = new URL((window.APP_VENDOR_BASE || 'vendor/') + 'pdfjs/', document.baseURI).href;
+      pdfjsPromise = import(base + 'pdf.min.js').then((lib) => {
+        lib.GlobalWorkerOptions.workerSrc = base + 'pdf.worker.min.js';
+        return lib;
+      }).catch((e) => { pdfjsPromise = null; throw new Error('Could not load the PDF reader. Check the internet connection and try again.'); });
+    }
+    return pdfjsPromise;
+  }
+
+  async function readPdf(file, onProgress) {
+    const lib = await loadPdfJs();
+    const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
+    const pages = [];
+    let chars = 0;
+    for (let n = 1; n <= doc.numPages; n++) {
+      onProgress(n, doc.numPages);
+      const page = await doc.getPage(n);
+      const vp = page.getViewport({ scale: 1 });
+      const tc = await page.getTextContent();
+      const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({ s: it.str, x: it.transform[4], y: vp.height - it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || 10 }));
+      chars += items.reduce((k, it) => k + it.s.trim().length, 0);
+      pages.push({ width: vp.width, height: vp.height, items });
+    }
+    return { text: L.pdfPagesToText(pages), pages: doc.numPages, chars };
+  }
+
+  function groupedChapterOptions(selected) {
+    return S.subjects.map((s) => '<optgroup label="' + esc(s.name) + '">' +
+      S.chapters.filter((c) => c.subject_id === s.id).map((c) => '<option value="' + c.id + '"' + (String(selected) === String(c.id) ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('') + '</optgroup>').join('');
+  }
 
   async function viewImport() {
-    setTitle('Paste questions');
-    const st = S.imp || (S.imp = { subject: (S.subjects[0] || {}).id, chapter_id: '', difficulty: 'medium', qtype: 'single', source_type: 'own', source_note: '', text: '', parsed: null });
+    setTitle('Add questions from PDF or text');
+    const st = S.imp || (S.imp = { chapter_id: '', difficulty: 'medium', qtype: 'single', source_type: 'own', source_note: '', text: '', parsed: null, fileInfo: null });
+    const isReady = (it) => it.include && it.answer && it.chapter_id && it.body && it.options.every((o) => o.trim());
     main().innerHTML =
-      '<div class="page-head"><div><h1>Paste questions</h1><p class="sub">Copy questions from a PDF or Word file and paste them below. Every question in one batch goes to the same chapter. You check each one before it is saved.</p></div></div>' +
-      '<div class="panel"><div class="form-grid">' +
-      '<label class="field">Subject<select id="iSubject">' + subjectOptions(st.subject) + '</select></label>' +
-      '<label class="field">Chapter<select id="iChapter"><option value="">Choose…</option>' + chapterOptions(st.subject, st.chapter_id, true) + '</select></label>' +
+      '<div class="page-head"><div><h1>Add questions from a PDF</h1><p class="sub">Upload a question paper, or paste text copied from one. The app splits it into questions; you check each one, set its chapter, and save.</p></div></div>' +
+      '<div class="panel">' +
+      '<div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="iPdf" accept="application/pdf,.pdf" hidden>Upload PDF</label>' +
+      '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Answer keys at the end are picked up too.') + '</span></div>' +
+      '<div id="pdfNote"></div>' +
+      '<details style="margin-top:14px"' + (st.text ? ' open' : '') + '><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">Text read from the PDF, or paste your own</summary>' +
+      '<textarea id="iText" class="q-input" rows="12" style="margin-top:10px" placeholder="1. The SI unit of force is\n(a) joule\n(b) newton\n(c) watt\n(d) pascal\nAnswer: b\nSolution: F = ma\n\n2. Next question…">' + esc(st.text) + '</textarea>' +
+      '<div class="help" style="margin-top:10px">Each question starts with its number (<code>1.</code> or <code>Q1.</code>). Options can be <code>(a)</code> <code>a)</code> or <code>(1)</code>, one per line or on one line. Answers come from <code>Answer: b</code> lines or an <code>Answer key</code> list (<code>1-b 2-c</code> or <code>1. (2) 2. (4)</code>). If you fix something here, press Read again.</div>' +
+      '<div class="form-actions"><button class="btn" data-act="parse">Read again</button></div></details>' +
+      '<h3 style="margin:18px 0 10px">Settings for these questions</h3><div class="form-grid">' +
+      '<label class="field">Chapter for all<span class="hint">Or set it per question below</span><select id="iChapter"><option value="">Set per question</option>' + groupedChapterOptions(st.chapter_id) + '</select></label>' +
       '<label class="field">Difficulty<select id="iDiff">' + mapOptions(DIFFS, st.difficulty) + '</select></label>' +
       '<label class="field">Type<select id="iType">' + mapOptions(QTYPES, st.qtype) + '</select></label>' +
       '<label class="field">Source<select id="iSource">' + mapOptions(SOURCES, st.source_type) + '</select></label>' +
       '<label class="field">Source details<input id="iSourceNote" type="text" maxlength="160" value="' + esc(st.source_note) + '" placeholder="e.g. NEET 2022"></label>' +
-      '</div>' +
-      '<label class="field" style="margin-top:14px">Questions<textarea id="iText" class="q-input" rows="14" placeholder="1. The SI unit of force is\n(a) joule\n(b) newton\n(c) watt\n(d) pascal\nAnswer: b\nSolution: F = ma\n\n2. Next question…">' + esc(st.text) + '</textarea></label>' +
-      '<div class="help" style="margin-top:10px">Start each question with its number (<code>1.</code> or <code>Q1.</code>). Options can be <code>(a)</code> <code>a)</code> or <code>(1)</code>, one per line or all on one line. Put <code>Answer: b</code> after the options, or an <code>Answer key</code> list at the end (<code>1-b 2-c 3-a</code>). <code>Solution:</code> is optional. Diagrams can be added afterwards by editing the question.</div>' +
-      '<div class="form-actions"><button class="btn primary" data-act="parse">Read questions</button></div></div>' +
+      '</div></div>' +
       '<section id="impPreview" class="section"></section>';
 
-    $('#iSubject').addEventListener('change', (e) => { st.subject = Number(e.target.value); st.chapter_id = ''; $('#iChapter').innerHTML = '<option value="">Choose…</option>' + chapterOptions(st.subject, '', true); });
-    $('#iChapter').addEventListener('change', (e) => { st.chapter_id = Number(e.target.value) || ''; renderPreview(); });
+    const status = (msg) => { const el = $('#pdfStatus'); if (el) el.textContent = msg; };
+    $('#iChapter').addEventListener('change', (e) => {
+      const prev = st.chapter_id;
+      st.chapter_id = Number(e.target.value) || '';
+      if (st.parsed) st.parsed.forEach((it) => { if (!it.chapter_id || it.chapter_id === prev) it.chapter_id = st.chapter_id; });
+      renderPreview();
+    });
     $('#iDiff').addEventListener('change', (e) => { st.difficulty = e.target.value; });
     $('#iType').addEventListener('change', (e) => { st.qtype = e.target.value; });
     $('#iSource').addEventListener('change', (e) => { st.source_type = e.target.value; });
     $('#iSourceNote').addEventListener('input', (e) => { st.source_note = e.target.value; });
     $('#iText').addEventListener('input', (e) => { st.text = e.target.value; });
 
+    function parseNow() {
+      const items = L.parsePasted(st.text);
+      st.parsed = items.map((it) => Object.assign(it, { include: it.options.filter((o) => o.trim()).length === 4 && !!it.body, chapter_id: st.chapter_id || '' }));
+      return items.length;
+    }
+
+    $('#iPdf').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      $('#pdfNote').innerHTML = '';
+      status('Opening ' + file.name + '…');
+      try {
+        const res = await readPdf(file, (n, total) => status('Reading page ' + n + ' of ' + total + '…'));
+        st.text = res.text;
+        $('#iText').value = st.text;
+        const found = parseNow();
+        st.fileInfo = file.name + ': ' + res.pages + ' page' + (res.pages === 1 ? '' : 's') + ', ' + found + ' question' + (found === 1 ? '' : 's') + ' found';
+        status(st.fileInfo);
+        if (res.chars < res.pages * 40) {
+          $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">This PDF has almost no text in it, so it is probably a scan or photos of pages. The app can only read PDFs made on a computer. Give scanned papers to the admin to add another way.</div>';
+        } else if (!found) {
+          $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">No numbered questions were found. Open “Text read from the PDF” below to see what was read.</div>';
+        }
+        renderPreview();
+        if (found) $('#impPreview').scrollIntoView({ behavior: 'smooth' });
+      } catch (err) {
+        status('Could not read that file.');
+        fail(/password/i.test(err && err.message) ? new Error('That PDF is password-protected. Remove the password and try again.') : err);
+      }
+    });
+
     function renderPreview() {
       const box = $('#impPreview');
       if (!st.parsed) { box.innerHTML = ''; return; }
       const items = st.parsed;
-      const ready = items.filter((it) => it.include && it.answer && it.body && it.options.every((o) => o.trim()));
-      box.innerHTML = '<div class="draft-head"><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
-        '<div class="row"><span class="muted small">' + ready.length + ' ready to save</span><button class="btn primary" data-act="save-imp"' + (ready.length && st.chapter_id ? '' : ' disabled') + '>Save ' + ready.length + ' to ' + esc(st.chapter_id ? chapterName(st.chapter_id) : 'chapter') + '</button></div></div>' +
-        (!st.chapter_id ? '<div class="notice warn" style="margin-bottom:12px">Choose a chapter above before saving.</div>' : '') +
-        items.map((it, i) => '<article class="qcard"><div class="meta"><b>Q' + it.num + '</b>' +
+      const ready = items.filter(isReady);
+      const noChapter = items.filter((it) => it.include && !it.chapter_id).length;
+      const noAnswer = items.filter((it) => it.include && !it.answer).length;
+      const chOpts = groupedChapterOptions('');
+      box.innerHTML =
+        '<div class="draft-head"><div><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
+        '<p class="muted small" style="margin-top:4px">' + ready.length + ' ready to save' + (noChapter ? ' · ' + noChapter + ' need a chapter' : '') + (noAnswer ? ' · ' + noAnswer + ' need the correct option' : '') + '</p></div>' +
+        '<button class="btn primary" data-act="save-imp"' + (ready.length ? '' : ' disabled') + '>Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' +
+        (items.length > 1 ? '<div class="panel" style="margin-bottom:12px"><div class="row" style="gap:8px"><b class="small">Set chapter for questions</b>' +
+          '<input type="number" id="rFrom" min="1" style="width:76px" placeholder="from" aria-label="From question number"><span class="small">to</span><input type="number" id="rTo" min="1" style="width:76px" placeholder="to" aria-label="To question number">' +
+          '<select id="rChapter" style="max-width:280px" aria-label="Chapter"><option value="">Choose chapter…</option>' + chOpts + '</select><button class="btn sm" data-act="apply-range">Apply</button></div></div>' : '') +
+        items.map((it, i) => '<article class="qcard"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + ' section</span>' : '') +
           (it.warnings.length ? it.warnings.map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : '<span class="chip easy">Looks right</span>') +
           '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + '> Include</label></div>' +
           questionHTML({ body: it.body, options: it.options.map((t) => ({ text: t, image: null })), answer: it.answer, images: [] }, { showAnswer: true }) +
-          '<div class="row small" style="margin-top:10px"><span class="muted">Correct option:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</div>' +
-          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') + '</article>').join('');
+          '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
+          '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select></div>' +
+          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') + '</article>').join('') +
+        (ready.length ? '<div class="form-actions"><button class="btn primary" data-act="save-imp">Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' : '') +
+        '<p class="muted small" style="margin-top:12px">Diagrams are not copied from PDFs. After saving, open a question from the bank and paste a screenshot of its diagram.</p>';
       $$('#impPreview input[data-inc]').forEach((c) => c.addEventListener('change', () => { st.parsed[Number(c.dataset.inc)].include = c.checked; renderPreview(); }));
       $$('#impPreview input[data-ans]').forEach((r) => r.addEventListener('change', () => { const it = st.parsed[Number(r.dataset.ans)]; it.answer = Number(r.value); it.warnings = it.warnings.filter((w) => w !== 'No answer found'); renderPreview(); }));
+      $$('#impPreview select[data-ich]').forEach((sel) => sel.addEventListener('change', () => { st.parsed[Number(sel.dataset.ich)].chapter_id = Number(sel.value) || ''; renderPreview(); }));
     }
 
+    S.actions['apply-range'] = () => {
+      const from = Number($('#rFrom').value), to = Number($('#rTo').value) || from, ch = Number($('#rChapter').value);
+      if (!from || !ch) { toast('Enter the question numbers and choose a chapter.', 'bad'); return; }
+      let n = 0;
+      st.parsed.forEach((it) => { if (it.num >= Math.min(from, to) && it.num <= Math.max(from, to)) { it.chapter_id = ch; n++; } });
+      toast(n + ' question' + (n === 1 ? '' : 's') + ' set to ' + chapterName(ch));
+      renderPreview();
+    };
     S.actions.parse = () => {
-      const items = L.parsePasted(st.text);
-      if (!items.length) { toast('No questions found. Check that each starts with a number.', 'bad'); return; }
-      st.parsed = items.map((it) => Object.assign(it, { include: true }));
+      const n = parseNow();
+      if (!n) { toast('No questions found. Check that each starts with a number.', 'bad'); return; }
       renderPreview();
       $('#impPreview').scrollIntoView({ behavior: 'smooth' });
     };
     S.actions['save-imp'] = async (b) => {
-      const ready = st.parsed.filter((it) => it.include && it.answer && it.body && it.options.every((o) => o.trim()));
-      if (!st.chapter_id || !ready.length) return;
+      const ready = st.parsed.filter(isReady);
+      if (!ready.length) return;
       busy(b, true, 'Saving…');
       try {
         const n = await Api.insertQuestions(ready.map((it) => ({
-          chapter_id: st.chapter_id, qtype: st.qtype, difficulty: st.difficulty, body: it.body,
+          chapter_id: it.chapter_id, qtype: st.qtype, difficulty: st.difficulty, body: it.body,
           options: it.options.map((t) => ({ text: t.trim(), image: null })), answer: it.answer, solution: it.solution || null,
           images: [], source_type: st.source_type, source_note: st.source_note.trim() || null,
         })));
         invalidateMeta();
-        toast(n + ' questions added to ' + chapterName(st.chapter_id));
-        S.bank = Object.assign(S.bank, { subject: String(st.subject), chapter: String(st.chapter_id), page: 0, search: '', mine: false, samples: false, archived: false });
-        st.text = ''; st.parsed = null;
+        const chapters = [...new Set(ready.map((it) => it.chapter_id))];
+        toast(n + ' question' + (n === 1 ? '' : 's') + ' added to the bank');
+        S.bank = Object.assign(S.bank, { subject: '', chapter: chapters.length === 1 ? String(chapters[0]) : '', page: 0, search: '', mine: true, samples: false, archived: false });
+        if (chapters.length === 1) S.bank.subject = String((S.chapterById.get(chapters[0]) || {}).subject_id || '');
+        st.text = ''; st.parsed = null; st.fileInfo = null;
         location.hash = '#/bank';
       } catch (e) { fail(e); busy(b, false); }
     };

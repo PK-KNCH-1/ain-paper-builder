@@ -351,6 +351,15 @@
     const ansLine = /^\s*(?:ans(?:wer)?|key|correct(?:\s+(?:answer|option))?)\s*[:\-–.]?\s*(?:option\s*)?\(?\s*([a-dA-D1-4])\s*\)?(?:[\s.,;:].*)?$/i;
     const solLine = /^\s*(?:sol(?:ution)?|explanation|hint)\s*[:\-–.]\s*(.*)$/i;
     const keyHeader = /^\s*(?:answer\s*key|answers|answer\s*sheet)\s*[:\-]?\s*(.*)$/i;
+    const keyTitle = /[:\-–]\s*(?:answer\s*key|answers)\s*$/i;
+    // One answer-key entry: 12. (3) | 12-c | 12 (c) | 12) 3 | Q12 c. A separator between number and option is required.
+    const PAIR = '(?:Q\\.?\\s*)?(\\d{1,3})(?:\\s*[.):\\-–]\\s*\\(?|\\s*\\(|\\s+)\\s*([a-dA-D1-4])\\s*\\)?';
+    const keyOnly = new RegExp('^\\s*(?:' + PAIR.replace(/(?<!\\)\((?!\?)/g, '(?:') + '\\s*[,;|]?\\s*){3,}$');
+    const subjectHead = /^\s*(physics|chemistry|botany|zoology|biology)(?:\s*[:\-–]?\s*(?:section|part)\s*[a-d1-4])?\s*$/i;
+    const sectionHead = /^\s*(?:section|part)\s*[-–:]?\s*[a-d1-4]\s*$/i;
+    const endMark = /^[\s—–\-*.]*(?:end|the end)[\s—–\-*.]*$/i;
+    let subject = null;
+    const preamble = [];
 
     const qs = [];
     let cur = null;
@@ -359,13 +368,13 @@
     const keyMap = {};
 
     const startQ = (num, rest) => {
-      cur = { num: num ? Number(num) : qs.length + 1, body: rest ? [rest] : [], options: [], answer: null, solution: [] };
+      cur = { num: num ? Number(num) : qs.length + 1, body: rest ? [rest] : [], options: [], answer: null, solution: [], subject };
       qs.push(cur);
       mode = 'body';
     };
 
     const readKey = (line) => {
-      const re = /(\d{1,3})\s*[.):\-–]?\s*\(?\s*([a-dA-D1-4])\s*\)?(?![a-z])/g;
+      const re = new RegExp('(?:^|[\\s,;|])' + PAIR + '(?=$|[\\s,;|.])', 'g');
       let m, found = false;
       while ((m = re.exec(line))) { keyMap[Number(m[1])] = LETTERS[m[2].toLowerCase()]; found = true; }
       return found;
@@ -376,8 +385,14 @@
       if (!line.trim()) { if (mode === 'solution') cur.solution.push(''); continue; }
 
       const kh = line.match(keyHeader);
-      if (kh) { keyMode = true; if (kh[1]) readKey(kh[1]); continue; }
+      if (kh || keyTitle.test(line)) { keyMode = true; if (kh && kh[1]) readKey(kh[1]); continue; }
       if (keyMode) { if (readKey(line)) continue; keyMode = false; }
+      if (keyOnly.test(line)) { readKey(line); continue; }
+
+      const spaced = /^\s*(?:[A-Za-z] ){3,}[A-Za-z]\s*$/.test(line) ? line.replace(/\s+/g, '') : line;
+      const sh = spaced.match(subjectHead);
+      if (sh) { subject = sh[1][0].toUpperCase() + sh[1].slice(1).toLowerCase(); if (subject === 'Biology') subject = null; if (cur && mode === 'options') mode = 'after'; continue; }
+      if (sectionHead.test(line) || endMark.test(line)) continue;
 
       const am = line.match(ansLine);
       if (am && cur) { cur.answer = LETTERS[am[1].toLowerCase()]; mode = 'after'; continue; }
@@ -402,28 +417,140 @@
       }
 
       const qm = line.match(qStart);
-      if (qm && (!cur || cur.options.length >= 2 || mode === 'after' || mode === 'solution' || !cur.body.length)) {
-        startQ(qm[1] || qm[2], (qm[3] || '').trim());
-        continue;
+      if (qm) {
+        const num = Number(qm[1] || qm[2]);
+        // Numbered lines before the real first question (instructions) are dropped when numbering restarts at 1.
+        if (cur && num === 1 && !cur.options.length) {
+          for (let k = qs.length - 1; k >= 0; k--) if (!qs[k].options.length) qs.splice(k, 1);
+          cur = null;
+        }
+        if (!cur || cur.options.length >= 2 || mode === 'after' || mode === 'solution' || !cur.body.length || num === cur.num + 1) {
+          startQ(num, (qm[3] || '').trim());
+          continue;
+        }
       }
 
-      if (!cur) { startQ(null, line.trim()); continue; }
+      if (!cur) { preamble.push(line.trim()); continue; }
       if (mode === 'solution') cur.solution.push(line.trim());
       else if (mode === 'options' && cur.options.length) cur.options[cur.options.length - 1] += ' ' + line.trim();
       else cur.body.push(line.trim());
     }
 
+    // Lines wrapped by the PDF or the page width are joined back into sentences; list rows keep their own line.
+    const keepBreak = /^\s*(?:\(?[A-Da-d]\)|[A-D][.)]\s|\(?[ivx]{1,4}\)|[IVX]{1,4}[.)]\s|\d{1,2}[.)]\s|\*\*|statement|assertion|reason|list|column|choose|select|codes|\|)/i;
+    const joinLines = (arr) => arr.reduce((out, l) => {
+      if (!out) return l;
+      if (l === '' || keepBreak.test(l) || /[:?]$/.test(out) || /\n$/.test(out)) return out + '\n' + l;
+      return out + ' ' + l;
+    }, '');
+    if (!qs.length && preamble.length && !/^\s*1[.)]\s/.test(preamble[0])) return parsePasted('1. ' + preamble.join('\n'));
     return qs.map((q) => {
       const answer = q.answer || keyMap[q.num] || null;
       const warnings = [];
-      const body = q.body.join('\n').trim();
+      const body = joinLines(q.body).trim();
       if (!body) warnings.push('No question text found');
       if (q.options.length !== 4) warnings.push('Found ' + q.options.length + ' options instead of 4');
       if (!answer) warnings.push('No answer found');
       const options = q.options.slice(0, 4);
       while (options.length < 4) options.push('');
-      return { num: q.num, body, options, answer, solution: q.solution.join('\n').trim(), warnings };
+      return { num: q.num, body, options, answer, solution: joinLines(q.solution).trim(), subject: q.subject || null, warnings };
     });
+  }
+
+  /* ---------------- PDF text to lines ---------------- */
+  // pages: [{width, height, items: [{s, x, y, w, h}]}] with y measured from the top of the page.
+
+  function groupLines(items) {
+    const sorted = items.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    const lines = [];
+    for (const it of sorted) {
+      const tol = Math.max(2, (it.h || 10) * 0.55);
+      let line = null;
+      for (let k = lines.length - 1; k >= 0 && k >= lines.length - 4; k--) {
+        if (Math.abs(lines[k].y - it.y) <= tol) { line = lines[k]; break; }
+      }
+      if (!line) { line = { y: it.y, items: [] }; lines.push(line); }
+      line.items.push(it);
+    }
+    lines.forEach((l) => l.items.sort((a, b) => a.x - b.x));
+    return lines.sort((a, b) => a.y - b.y);
+  }
+
+  function lineText(items) {
+    let s = '';
+    let prevEnd = null;
+    for (const it of items) {
+      if (prevEnd != null && it.x - prevEnd > (it.h || 10) * 0.18 && !/\s$/.test(s) && !/^\s/.test(it.s)) s += ' ';
+      s += it.s;
+      prevEnd = prevEnd == null ? it.x + it.w : Math.max(prevEnd, it.x + it.w);
+    }
+    return s.replace(/\s+/g, ' ').trim();
+  }
+
+  function crossesGutter(line, gx, minGap) {
+    let lEnd = -Infinity, rStart = Infinity;
+    for (const it of line.items) {
+      if (it.x < gx - 0.5 && it.x + it.w > gx + 0.5) return true;
+      if (it.x + it.w <= gx + 0.5) lEnd = Math.max(lEnd, it.x + it.w);
+      else rStart = Math.min(rStart, it.x);
+    }
+    return lEnd > -Infinity && rStart < Infinity && rStart - lEnd < minGap;
+  }
+
+  // x position of the gap between two columns, or null for a single-column page
+  function findGutter(lines, width) {
+    if (lines.length < 6) return null;
+    const minGap = width * 0.015;
+    let best = null;
+    for (let f = 0.36; f <= 0.64001; f += 0.01) {
+      const gx = width * f;
+      let cross = 0, left = 0, right = 0;
+      for (const l of lines) {
+        if (crossesGutter(l, gx, minGap)) { cross++; continue; }
+        if (l.items.some((it) => it.x + it.w <= gx + 0.5)) left++;
+        if (l.items.some((it) => it.x + it.w > gx + 0.5)) right++;
+      }
+      const n = lines.length;
+      if (cross / n < 0.12 && left / n > 0.25 && right / n > 0.25 && (!best || cross < best.cross)) best = { gx, cross };
+    }
+    return best ? best.gx : null;
+  }
+
+  function pageLines(page) {
+    const lines = groupLines(page.items || []);
+    // Answer-key grids read best row by row, so pages with a key are never split into columns.
+    const hasKey = lines.some((l) => /answer\s*key/i.test(lineText(l.items)));
+    const gx = hasKey ? null : findGutter(lines, page.width);
+    if (gx == null) return lines.map((l) => ({ y: l.y, text: lineText(l.items) }));
+    const minGap = page.width * 0.015;
+    const out = [];
+    let left = [], right = [];
+    const flush = () => { out.push(...left, ...right); left = []; right = []; };
+    for (const l of lines) {
+      if (crossesGutter(l, gx, minGap)) { flush(); out.push({ y: l.y, text: lineText(l.items) }); continue; }
+      const li = l.items.filter((it) => it.x + it.w <= gx + 0.5);
+      const ri = l.items.filter((it) => it.x + it.w > gx + 0.5);
+      if (li.length) left.push({ y: l.y, text: lineText(li) });
+      if (ri.length) right.push({ y: l.y, text: lineText(ri) });
+    }
+    flush();
+    return out;
+  }
+
+  function pdfPagesToText(pages) {
+    const perPage = pages.map((p) => ({ p, lines: pageLines(p).filter((l) => l.text) }));
+    // Running headers and footers: the same text near the top or bottom edge on most pages.
+    const norm = (t) => t.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
+    const edge = (p, l) => l.y < p.height * 0.08 || l.y > p.height * 0.92;
+    const counts = new Map();
+    perPage.forEach(({ p, lines }) => {
+      new Set(lines.filter((l) => edge(p, l)).map((l) => norm(l.text))).forEach((k) => counts.set(k, (counts.get(k) || 0) + 1));
+    });
+    const repeated = (k) => pages.length >= 2 && (counts.get(k) || 0) >= Math.max(2, Math.ceil(pages.length * 0.5));
+    const pageNo = /^(page\s*)?#+(\s*(of|\/)\s*#+)?$/;
+    return perPage.map(({ p, lines }) => lines
+      .filter((l) => !(edge(p, l) && (repeated(norm(l.text)) || pageNo.test(norm(l.text)))))
+      .map((l) => l.text).join('\n')).join('\n');
   }
 
   /* ---------------- Small helpers ---------------- */
@@ -438,7 +565,7 @@
   }
 
   const api = {
-    DAY, esc, tokenize, renderInline, renderRich, visibleLength,
+    DAY, esc, tokenize, renderInline, renderRich, visibleLength, pdfPagesToText, pageLines,
     DEFAULT_SETTINGS, buildHistory, repStatus, gapDaysFor,
     MIXES, mulberry32, shuffle, apportion, buildPaper, nextReplacement,
     scoreResponses, parsePasted, paperCode,
