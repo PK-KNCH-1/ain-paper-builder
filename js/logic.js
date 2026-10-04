@@ -346,7 +346,7 @@
     const lines = String(text || '').replace(/\r/g, '').replace(/ /g, ' ').split('\n');
     const qStart = /^\s*(?:Q(?:uestion)?\s*\.?\s*(\d{1,3})\s*[.):\-]?|(\d{1,3})\s*[.)])(?:\s+(.*))?$/i;
     // (a) (A) (1) a) a. A) are options; "A." is not, because match-the-list rows often start that way.
-    const optLine = /^\s*(?:\(\s*([a-dA-D1-4])\s*\)|([a-d])\s*[).]|([A-D])\s*\))\s+(.*)$/;
+    const optLine = /^\s*(?:\(\s*([a-dA-D1-4])\s*\)|([a-d])\s*[).]|([A-D])\s*\))(?:\s+(.*))?$/;
     const inlineOpt = /\(\s*([a-dA-D1-4])\s*\)/g;
     const ansLine = /^\s*(?:ans(?:wer)?|key|correct(?:\s+(?:answer|option))?)\s*[:\-–.]?\s*(?:option\s*)?\(?\s*([a-dA-D1-4])\s*\)?(?:[\s.,;:].*)?$/i;
     const solLine = /^\s*(?:sol(?:ution)?|explanation|hint)\s*[:\-–.]\s*(.*)$/i;
@@ -360,6 +360,7 @@
     const endMark = /^[\s—–\-*.]*(?:end|the end)[\s—–\-*.]*$/i;
     let subject = null;
     const preamble = [];
+    let lineNo = null;
 
     const qs = [];
     let cur = null;
@@ -368,7 +369,7 @@
     const keyMap = {};
 
     const startQ = (num, rest) => {
-      cur = { num: num ? Number(num) : qs.length + 1, body: rest ? [rest] : [], options: [], answer: null, solution: [], subject };
+      cur = { num: num ? Number(num) : qs.length + 1, body: rest ? [rest] : [], options: [], answer: null, solution: [], subject, startLine: lineNo, lastLine: lineNo };
       qs.push(cur);
       mode = 'body';
     };
@@ -380,8 +381,8 @@
       return found;
     };
 
-    for (const raw of lines) {
-      const line = raw.replace(/\s+$/, '');
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx].replace(/\s+$/, '');
       if (!line.trim()) { if (mode === 'solution') cur.solution.push(''); continue; }
 
       const kh = line.match(keyHeader);
@@ -395,23 +396,25 @@
       if (sectionHead.test(line) || endMark.test(line)) continue;
 
       const am = line.match(ansLine);
-      if (am && cur) { cur.answer = LETTERS[am[1].toLowerCase()]; mode = 'after'; continue; }
+      if (am && cur) { cur.answer = LETTERS[am[1].toLowerCase()]; cur.lastLine = idx; mode = 'after'; continue; }
 
       const sm = line.match(solLine);
-      if (sm && cur) { cur.solution = sm[1] ? [sm[1]] : []; mode = 'solution'; continue; }
+      if (sm && cur) { cur.solution = sm[1] ? [sm[1]] : []; cur.lastLine = idx; mode = 'solution'; continue; }
 
       // Several options on one line: (a) 2 (b) 4 (c) 6 (d) 8
       const markers = line.match(inlineOpt);
       if (cur && mode !== 'solution' && markers && markers.length >= 2 && /^\s*\(/.test(line)) {
         const parts = line.split(/\(\s*[a-dA-D1-4]\s*\)/).slice(1);
         parts.forEach((p) => cur.options.push(p.trim()));
+        cur.lastLine = idx;
         mode = 'options';
         continue;
       }
 
       const om = line.match(optLine);
       if (om && cur && mode !== 'solution' && cur.options.length < 4) {
-        cur.options.push(om[4].trim());
+        cur.options.push((om[4] || '').trim());
+        cur.lastLine = idx;
         mode = 'options';
         continue;
       }
@@ -425,12 +428,14 @@
           cur = null;
         }
         if (!cur || cur.options.length >= 2 || mode === 'after' || mode === 'solution' || !cur.body.length || num === cur.num + 1) {
+          lineNo = idx;
           startQ(num, (qm[3] || '').trim());
           continue;
         }
       }
 
       if (!cur) { preamble.push(line.trim()); continue; }
+      cur.lastLine = idx;
       if (mode === 'solution') cur.solution.push(line.trim());
       else if (mode === 'options' && cur.options.length) cur.options[cur.options.length - 1] += ' ' + line.trim();
       else cur.body.push(line.trim());
@@ -453,7 +458,7 @@
       if (!answer) warnings.push('No answer found');
       const options = q.options.slice(0, 4);
       while (options.length < 4) options.push('');
-      return { num: q.num, body, options, answer, solution: joinLines(q.solution).trim(), subject: q.subject || null, warnings };
+      return { num: q.num, body, options, answer, solution: joinLines(q.solution).trim(), subject: q.subject || null, startLine: q.startLine, lastLine: q.lastLine, warnings };
     });
   }
 
@@ -497,48 +502,79 @@
     return lEnd > -Infinity && rStart < Infinity && rStart - lEnd < minGap;
   }
 
-  // x position of the gap between two columns, or null for a single-column page
+  function proseWords(items) {
+    const text = items.map((it) => it.s).join(' ').replace(/\(\s*[a-dA-D1-4]\s*\)/g, ' ');
+    return (text.match(/[A-Za-z]{2,}/g) || []).length;
+  }
+
+  // x position of the gap between two columns, or null for a single-column page.
+  // Two columns need a vertical band near the middle that most lines do not cross, with text on both sides of it.
   function findGutter(lines, width) {
     if (lines.length < 6) return null;
     const minGap = width * 0.015;
     let best = null;
     for (let f = 0.36; f <= 0.64001; f += 0.01) {
       const gx = width * f;
-      let cross = 0, left = 0, right = 0;
+      let cross = 0, left = 0, right = 0, both = 0, proseL = 0, proseR = 0, rightOnly = 0;
       for (const l of lines) {
         if (crossesGutter(l, gx, minGap)) { cross++; continue; }
-        if (l.items.some((it) => it.x + it.w <= gx + 0.5)) left++;
-        if (l.items.some((it) => it.x + it.w > gx + 0.5)) right++;
+        const li = l.items.filter((it) => it.x + it.w <= gx + 0.5);
+        const ri = l.items.filter((it) => it.x + it.w > gx + 0.5);
+        if (li.length) left++;
+        if (ri.length) right++;
+        if (li.length && ri.length) both++;
+        if (ri.length && !li.length) rightOnly++;
+        if (proseWords(li) >= 5) proseL++;
+        if (proseWords(ri) >= 5) proseR++;
       }
       const n = lines.length;
-      if (cross / n < 0.12 && left / n > 0.25 && right / n > 0.25 && (!best || cross < best.cross)) best = { gx, cross };
+      // Evidence of real columns: running sentences on both sides, or a right side that carries on by itself.
+      // Option grids and side-by-side figures in a single-column page show neither.
+      const prose = proseL >= 1 && proseR >= 1 && proseL + proseR >= 3;
+      const independent = rightOnly >= 2 && rightOnly >= 0.25 * right && proseL + proseR >= 1;
+      if (cross / n < 0.34 && left / n > 0.25 && right / n > 0.25 && both / n >= 0.1 && (prose || independent) && (!best || cross < best.cross)) best = { gx, cross };
     }
     return best ? best.gx : null;
   }
 
+  function lineGeom(items, page, colX0, colX1, text) {
+    let top = Infinity, bottom = -Infinity, x0 = Infinity, x1 = -Infinity;
+    for (const it of items) {
+      const h = it.h || 10;
+      top = Math.min(top, it.y - h); bottom = Math.max(bottom, it.y + h * 0.28);
+      x0 = Math.min(x0, it.x); x1 = Math.max(x1, it.x + it.w);
+    }
+    return { text: text != null ? text : lineText(items), y: items.length ? items[0].y : 0, top, bottom, x0, x1, colX0, colX1, items };
+  }
+
   function pageLines(page) {
-    const lines = groupLines(page.items || []);
-    // Answer-key grids read best row by row, so pages with a key are never split into columns.
-    const hasKey = lines.some((l) => /answer\s*key/i.test(lineText(l.items)));
-    const gx = hasKey ? null : findGutter(lines, page.width);
-    if (gx == null) return lines.map((l) => ({ y: l.y, text: lineText(l.items) }));
-    const minGap = page.width * 0.015;
+    const all = groupLines(page.items || []);
+    const W = page.width;
+    // An answer key reads best row by row, so everything from its heading down is kept as full-width lines.
+    const keyAt = all.findIndex((l) => /^\s*(?:answer\s*key|answers|answer\s*sheet)\s*:?\s*$|[:\-–]\s*answer\s*key\s*$/i.test(lineText(l.items)));
+    const lines = keyAt >= 0 ? all.slice(0, keyAt) : all;
+    const tail = keyAt >= 0 ? all.slice(keyAt).map((l) => lineGeom(l.items, page, 0, W)) : [];
+    const gx = findGutter(lines, W);
+    if (gx == null) return lines.map((l) => lineGeom(l.items, page, 0, W)).concat(tail);
+    const minGap = W * 0.015;
     const out = [];
     let left = [], right = [];
     const flush = () => { out.push(...left, ...right); left = []; right = []; };
     for (const l of lines) {
-      if (crossesGutter(l, gx, minGap)) { flush(); out.push({ y: l.y, text: lineText(l.items) }); continue; }
+      if (crossesGutter(l, gx, minGap)) { flush(); out.push(lineGeom(l.items, page, 0, W)); continue; }
       const li = l.items.filter((it) => it.x + it.w <= gx + 0.5);
       const ri = l.items.filter((it) => it.x + it.w > gx + 0.5);
-      if (li.length) left.push({ y: l.y, text: lineText(li) });
-      if (ri.length) right.push({ y: l.y, text: lineText(ri) });
+      if (li.length) left.push(lineGeom(li, page, 0, gx));
+      if (ri.length) right.push(lineGeom(ri, page, gx, W));
     }
     flush();
-    return out;
+    return out.concat(tail);
   }
 
-  function pdfPagesToText(pages) {
-    const perPage = pages.map((p) => ({ p, lines: pageLines(p).filter((l) => l.text) }));
+  // Lines of text in reading order, each with its page and position. pdfPagesToText joins them with newlines,
+  // so line n of the text is entry n of this list.
+  function pdfPagesToLines(pages) {
+    const perPage = pages.map((p, pi) => ({ p, lines: pageLines(p).filter((l) => l.text).map((l) => Object.assign(l, { page: pi })) }));
     // Running headers and footers: the same text near the top or bottom edge on most pages.
     const norm = (t) => t.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
     const edge = (p, l) => l.y < p.height * 0.08 || l.y > p.height * 0.92;
@@ -548,9 +584,153 @@
     });
     const repeated = (k) => pages.length >= 2 && (counts.get(k) || 0) >= Math.max(2, Math.ceil(pages.length * 0.5));
     const pageNo = /^(page\s*)?#+(\s*(of|\/)\s*#+)?$/;
-    return perPage.map(({ p, lines }) => lines
-      .filter((l) => !(edge(p, l) && (repeated(norm(l.text)) || pageNo.test(norm(l.text)))))
-      .map((l) => l.text).join('\n')).join('\n');
+    const out = [];
+    perPage.forEach(({ p, lines }) => lines.forEach((l) => {
+      if (!(edge(p, l) && (repeated(norm(l.text)) || pageNo.test(norm(l.text))))) out.push(l);
+    }));
+    return out;
+  }
+
+  function pdfPagesToText(pages) {
+    return pdfPagesToLines(pages).map((l) => l.text).join('\n');
+  }
+
+  /* ---------------- Figures in PDFs ---------------- */
+
+  // Areas of the page that belong to each parsed question, in PDF points from the top-left of the page.
+  function questionRegions(questions, lines, pages) {
+    return questions.map((q, qi) => {
+      if (q.startLine == null) return [];
+      const s = q.startLine, e = Math.max(q.lastLine == null ? s : q.lastLine, s);
+      const groups = new Map();
+      for (let i = s; i <= e && i < lines.length; i++) {
+        const l = lines[i];
+        const key = l.page + ':' + Math.round(l.colX0);
+        if (!groups.has(key)) groups.set(key, { page: l.page, x0: l.colX0, x1: l.colX1, y0: l.top, y1: l.bottom });
+        const g = groups.get(key);
+        g.y0 = Math.min(g.y0, l.top); g.y1 = Math.max(g.y1, l.bottom);
+      }
+      return [...groups.values()].map((g) => {
+        const page = pages[g.page];
+        let limit = page.height * 0.95;
+        for (let i = 0; i < lines.length; i++) {
+          if (i >= s && i <= e) continue;
+          const l = lines[i];
+          if (l.page !== g.page || Math.round(l.colX0) !== Math.round(g.x0)) continue;
+          if (l.top >= g.y1 - 1 && l.top < limit) limit = l.top;
+        }
+        return { page: g.page, x0: g.x0, x1: g.x1, y0: Math.max(0, g.y0 - 2), y1: Math.max(g.y1, limit - 1) };
+      });
+    });
+  }
+
+  /*
+   * Finds drawings (graphs, diagrams, structures, pictures) inside one region of a rendered page.
+   *  gray: Uint8Array of the page, one byte per pixel (0 = black), size W x H
+   *  region: {x0, y0, x1, y1} in pixels; textBoxes: [{x0, y0, x1, y1}] in pixels; scale: pixels per PDF point
+   * Returns boxes in pixels, in reading order. Text is masked out first, so what is left is drawn ink.
+   */
+  function findFigures(gray, W, H, region, textBoxes, scale) {
+    const pt = scale;
+    const cell = Math.max(2, Math.round(1.5 * pt));
+    const rx0 = Math.max(0, Math.floor(region.x0)), ry0 = Math.max(0, Math.floor(region.y0));
+    const rx1 = Math.min(W, Math.ceil(region.x1)), ry1 = Math.min(H, Math.ceil(region.y1));
+    const gw = Math.ceil((rx1 - rx0) / cell), gh = Math.ceil((ry1 - ry0) / cell);
+    if (gw <= 0 || gh <= 0) return [];
+    const ink = new Uint8Array(gw * gh);
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const px0 = rx0 + gx * cell, py0 = ry0 + gy * cell;
+        const px1 = Math.min(rx1, px0 + cell), py1 = Math.min(ry1, py0 + cell);
+        let dark = 0;
+        for (let y = py0; y < py1 && dark < 2; y++) {
+          const row = y * W;
+          for (let x = px0; x < px1; x++) if (gray[row + x] < 150 && ++dark >= 2) break;
+        }
+        if (dark >= 2) ink[gy * gw + gx] = 1;
+      }
+    }
+    const pad = 1.2 * pt;
+    for (const b of textBoxes) {
+      const cx0 = Math.max(0, Math.floor((b.x0 - pad - rx0) / cell)), cx1 = Math.min(gw - 1, Math.floor((b.x1 + pad - rx0) / cell));
+      const cy0 = Math.max(0, Math.floor((b.y0 - pad - ry0) / cell)), cy1 = Math.min(gh - 1, Math.floor((b.y1 + pad - ry0) / cell));
+      for (let y = cy0; y <= cy1; y++) for (let x = cx0; x <= cx1; x++) ink[y * gw + x] = 0;
+    }
+    // Connected pieces of ink
+    const seen = new Uint8Array(gw * gh);
+    const comps = [];
+    const stack = [];
+    for (let i = 0; i < ink.length; i++) {
+      if (!ink[i] || seen[i]) continue;
+      let minx = Infinity, miny = Infinity, maxx = -1, maxy = -1, n = 0;
+      stack.push(i); seen[i] = 1;
+      while (stack.length) {
+        const k = stack.pop();
+        const x = k % gw, y = (k - x) / gw;
+        n++; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+          const nk = ny * gw + nx;
+          if (ink[nk] && !seen[nk]) { seen[nk] = 1; stack.push(nk); }
+        }
+      }
+      if (n >= 3) comps.push({ x0: rx0 + minx * cell, y0: ry0 + miny * cell, x1: rx0 + (maxx + 1) * cell, y1: ry0 + (maxy + 1) * cell });
+    }
+    // Join pieces that sit close together (a curve and its axes, a diagram and its parts)
+    const gap = 8 * pt;
+    let boxes = comps;
+    for (let changed = true; changed;) {
+      changed = false;
+      const next = [];
+      for (const b of boxes) {
+        const m = next.find((o) => b.x0 - gap <= o.x1 && o.x0 - gap <= b.x1 && b.y0 - gap <= o.y1 && o.y0 - gap <= b.y1);
+        if (m) { m.x0 = Math.min(m.x0, b.x0); m.y0 = Math.min(m.y0, b.y0); m.x1 = Math.max(m.x1, b.x1); m.y1 = Math.max(m.y1, b.y1); changed = true; }
+        else next.push(Object.assign({}, b));
+      }
+      boxes = next;
+    }
+    // Keep real drawings; drop rules, fraction bars, root signs and specks
+    boxes = boxes.filter((b) => (b.x1 - b.x0) >= 16 * pt && (b.y1 - b.y0) >= 16 * pt && (b.x1 - b.x0) * (b.y1 - b.y0) >= 700 * pt * pt);
+    // A box that is mostly text is a table or a framed passage, which the question text already has
+    const textShare = (b) => {
+      let a = 0;
+      for (const t of textBoxes) {
+        const w = Math.min(b.x1, t.x1) - Math.max(b.x0, t.x0), h = Math.min(b.y1, t.y1) - Math.max(b.y0, t.y0);
+        if (w > 0 && h > 0) a += w * h;
+      }
+      return a / ((b.x1 - b.x0) * (b.y1 - b.y0));
+    };
+    boxes = boxes.filter((b) => textShare(b) < 0.3);
+    // Take in labels that touch the drawing, add a margin, stay inside the region
+    for (const b of boxes) {
+      for (const t of textBoxes) {
+        if (t.x1 >= b.x0 - 3 * pt && t.x0 <= b.x1 + 3 * pt && t.y1 >= b.y0 - 3 * pt && t.y0 <= b.y1 + 3 * pt &&
+          (t.x1 - t.x0) < (b.x1 - b.x0) * 1.2) {
+          b.x0 = Math.min(b.x0, t.x0); b.y0 = Math.min(b.y0, t.y0); b.x1 = Math.max(b.x1, t.x1); b.y1 = Math.max(b.y1, t.y1);
+        }
+      }
+      b.x0 = Math.max(rx0, Math.floor(b.x0 - 4 * pt)); b.y0 = Math.max(ry0, Math.floor(b.y0 - 4 * pt));
+      b.x1 = Math.min(rx1, Math.ceil(b.x1 + 4 * pt)); b.y1 = Math.min(ry1, Math.ceil(b.y1 + 4 * pt));
+    }
+    return sortReading(boxes);
+  }
+
+  function sortReading(boxes) {
+    const rows = [];
+    boxes.slice().sort((a, b) => a.y0 - b.y0).forEach((b) => {
+      const row = rows.find((r) => Math.min(r.y1, b.y1) - Math.max(r.y0, b.y0) > 0.5 * Math.min(r.y1 - r.y0, b.y1 - b.y0));
+      if (row) { row.items.push(b); row.y0 = Math.min(row.y0, b.y0); row.y1 = Math.max(row.y1, b.y1); }
+      else rows.push({ y0: b.y0, y1: b.y1, items: [b] });
+    });
+    return rows.sort((a, b) => a.y0 - b.y0).flatMap((r) => r.items.sort((a, b) => a.x0 - b.x0));
+  }
+
+  // Where each figure goes: 'q' for the question, 1-4 for an option. Four figures with empty options become the options.
+  function assignFigures(options, count) {
+    const empty = options.filter((o) => !String(o || '').trim()).length;
+    if (empty >= 3 && count >= 4) return Array.from({ length: count }, (_, i) => (i >= count - 4 ? i - (count - 4) + 1 : 'q'));
+    return Array.from({ length: count }, () => 'q');
   }
 
   /* ---------------- Small helpers ---------------- */
@@ -565,7 +745,8 @@
   }
 
   const api = {
-    DAY, esc, tokenize, renderInline, renderRich, visibleLength, pdfPagesToText, pageLines,
+    DAY, esc, tokenize, renderInline, renderRich, visibleLength, pdfPagesToText, pdfPagesToLines, pageLines,
+    questionRegions, findFigures, assignFigures, sortReading,
     DEFAULT_SETTINGS, buildHistory, repStatus, gapDaysFor,
     MIXES, mulberry32, shuffle, apportion, buildPaper, nextReplacement,
     scoreResponses, parsePasted, paperCode,

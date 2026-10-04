@@ -92,15 +92,25 @@
   }
 
   function imgTag(path, cls) {
-    return path ? '<img data-path="' + esc(path) + '" alt="" class="' + esc(cls || '') + '" loading="lazy">' : '';
+    if (!path) return '';
+    if (/^(blob:|data:image\/)/.test(path)) return '<img src="' + esc(path) + '" alt="" class="' + esc(cls || '') + '">';
+    return '<img data-path="' + esc(path) + '" alt="" class="' + esc(cls || '') + '" loading="lazy">';
   }
   async function hydrateImages(root) {
-    const imgs = $$('img[data-path]', root || document).filter((i) => !i.getAttribute('src'));
+    const scope = root || document;
+    $$('ol.opts img', scope).forEach((img) => {
+      if (img.dataset.fit) return;
+      img.dataset.fit = '1';
+      img.addEventListener('load', () => fitOptions(img.closest('ol.opts') ? img.closest('ol.opts').parentNode : scope));
+    });
+    fitOptions(scope);
+    const imgs = $$('img[data-path]', scope).filter((i) => !i.getAttribute('src'));
     if (!imgs.length) return;
     try {
       const urls = await Api.signedUrls(imgs.map((i) => i.dataset.path));
       imgs.forEach((i) => { if (urls[i.dataset.path]) i.src = urls[i.dataset.path]; });
     } catch (e) { fail(e); }
+    fitOptions(scope);
   }
   function waitForImages(root) {
     const imgs = $$('img', root);
@@ -121,12 +131,25 @@
     return ids.map((id) => S.qcache.get(id)).filter(Boolean);
   }
 
+  // First guess at the option layout; fitOptions() corrects it once the page is drawn.
   function optionLayout(options) {
-    const lens = options.map((o) => (o.image ? 40 : L.visibleLength(o.text)));
-    const max = Math.max.apply(null, lens.concat([0]));
-    if (max <= 9) return 'g4';
-    if (max <= 26) return 'g2';
+    const max = Math.max.apply(null, options.map((o) => L.visibleLength(o.text)).concat([0]));
+    if (options.some((o) => o.image)) return max <= 26 ? 'g2' : '';
+    if (max <= 12) return 'g4';
+    if (max <= 30) return 'g2';
     return '';
+  }
+  // If options did not fit in rows of 4 (or 2) at the drawn width, step down so each row is aligned.
+  function fitOptions(scope) {
+    $$('ol.opts', scope || document).forEach((ol) => {
+      if (!ol.offsetParent) return;
+      const lis = $$(':scope > li', ol);
+      if (lis.length !== 4) return;
+      const top = (li) => Math.round(li.getBoundingClientRect().top);
+      const same = (a, b) => Math.abs(top(a) - top(b)) <= 3;
+      if (ol.classList.contains('g4') && !(same(lis[0], lis[3]))) { ol.classList.remove('g4'); ol.classList.add('g2'); }
+      if (ol.classList.contains('g2') && !(same(lis[0], lis[1]) && same(lis[2], lis[3]) && !same(lis[0], lis[2]))) ol.classList.remove('g2');
+    });
   }
 
   // One question as it appears on screen or paper
@@ -136,18 +159,25 @@
     while (options.length < 4) options.push({ text: '', image: null });
     const imgs = (q.images || []).length ? '<div class="q-imgs">' + q.images.map((p) => imgTag(p)).join('') + '</div>' : '';
     const optsHTML = '<ol class="opts ' + optionLayout(options) + '">' + options.map((op, i) =>
-      '<li class="' + (o.showAnswer && Number(q.answer) === i + 1 ? 'correct' : '') + '"><span class="on">(' + (i + 1) + ')</span><span>' +
+      '<li class="' + (o.showAnswer && Number(q.answer) === i + 1 ? 'correct' : '') + (op.image ? ' img-opt' : '') + '"><span class="on">(' + (i + 1) + ')</span><span>' +
       (op.text ? rich(op.text).replace(/^<p>|<\/p>$/g, '') : '') + (op.image ? imgTag(op.image) : '') + '</span></li>').join('') + '</ol>';
     return '<div class="rich">' + rich(q.body) + '</div>' + imgs + optsHTML;
   }
 
   async function prepareImage(file) {
-    if (!file || !/^image\//.test(file.type)) throw new Error('Choose an image file (PNG or JPG).');
+    const isHeic = /heic|heif/i.test(file && (file.type || file.name || ''));
+    if (!file || (!/^image\//.test(file.type) && !isHeic)) throw new Error('Choose an image file (PNG or JPG).');
     const extOf = (t) => ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/svg+xml': 'svg' }[t] || 'png');
+    const webSafe = /^image\/(png|jpeg|webp|gif|svg\+xml)$/.test(file.type);
     if (file.type === 'image/svg+xml' || file.type === 'image/gif') return { blob: file, ext: extOf(file.type) };
     let bmp = null;
     try { bmp = await createImageBitmap(file); } catch (e) { bmp = null; }
-    if (!bmp || (bmp.width <= 1600 && file.size < 1500000)) return { blob: file, ext: extOf(file.type) };
+    if (!bmp) {
+      if (webSafe) return { blob: file, ext: extOf(file.type) };
+      throw new Error('This photo format can’t be read in this browser. Take a screenshot of the diagram and add that instead.');
+    }
+    // Phone photos (HEIC) and very large images are redrawn as PNG or JPG so every browser and printer can show them.
+    if (webSafe && bmp.width <= 1600 && file.size < 1500000) return { blob: file, ext: extOf(file.type) };
     const scale = Math.min(1, 1600 / bmp.width);
     const c = document.createElement('canvas');
     c.width = Math.round(bmp.width * scale);
@@ -748,7 +778,7 @@
         let head = '';
         const sub = q ? (subjectOfChapter(q.chapter_id) || {}).name : null;
         if (sub && sub !== lastSub) { head = '<h2 class="subj">' + esc(sub) + '</h2>'; lastSub = sub; }
-        return head + '<div class="pq"><span class="qn">' + (i + 1) + '.</span><div>' + (q ? questionHTML(q) : '<p class="muted">This question was removed from the bank.</p>') + '</div></div>';
+        return '<div class="pq">' + head + '<span class="qn">' + (i + 1) + '.</span><div>' + (q ? questionHTML(q) : '<p class="muted">This question was removed from the bank.</p>') + '</div></div>';
       }).join('') + '<div class="end-mark">— END —</div></div>' +
       '<div class="sheet-foot"><span>Prepared for ' + esc(m ? m.name : '') + '</span><span class="mono">' + esc(p.code) + '</span></div></article>';
   }
@@ -1047,15 +1077,17 @@
       $$('#optsBox input[data-optimg]').forEach((inp) => inp.addEventListener('change', async () => {
         const file = inp.files[0];
         if (!file) return;
-        try { toast('Uploading image…'); q.options[Number(inp.dataset.optimg)].image = await uploadFile(file); renderOptions(); preview(); }
-        catch (e) { fail(e); }
+        const lab = inp.closest('label'); if (lab && lab.lastChild) lab.lastChild.textContent = 'Uploading…';
+        try { q.options[Number(inp.dataset.optimg)].image = await uploadFile(file); renderOptions(); preview(); }
+        catch (e) { fail(e); renderOptions(); }
       }));
       hydrateImages($('#optsBox'));
     }
 
     async function addImages(files) {
       for (const file of files) {
-        try { toast('Uploading image…'); q.images.push(await uploadFile(file)); }
+        const note = document.createElement('span'); note.className = 'muted small'; note.textContent = 'Uploading…'; $('#imgTiles').appendChild(note);
+        try { q.images.push(await uploadFile(file)); }
         catch (e) { fail(e); }
       }
       renderImages();
@@ -1142,15 +1174,54 @@
     const pages = [];
     let chars = 0;
     for (let n = 1; n <= doc.numPages; n++) {
-      onProgress(n, doc.numPages);
+      onProgress('Reading page ' + n + ' of ' + doc.numPages + '…');
       const page = await doc.getPage(n);
       const vp = page.getViewport({ scale: 1 });
       const tc = await page.getTextContent();
-      const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({ s: it.str, x: it.transform[4], y: vp.height - it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || 10 }));
+      const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({ s: it.str, x: it.transform[4], y: vp.height - it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || Math.abs(it.transform[1]) || 10 }));
       chars += items.reduce((k, it) => k + it.s.trim().length, 0);
       pages.push({ width: vp.width, height: vp.height, items });
     }
-    return { text: L.pdfPagesToText(pages), pages: doc.numPages, chars };
+    const lines = L.pdfPagesToLines(pages);
+    return { doc, pages, lines, text: lines.map((l) => l.text).join('\n'), numPages: doc.numPages, chars };
+  }
+
+  // Renders each page that has questions, finds drawings inside each question's area and crops them out as PNGs.
+  async function captureFigures(pdf, items, onProgress) {
+    const SCALE = 3;
+    const regions = L.questionRegions(items, pdf.lines, pdf.pages);
+    const byPage = new Map();
+    regions.forEach((rs, qi) => rs.forEach((r) => { if (!byPage.has(r.page)) byPage.set(r.page, []); byPage.get(r.page).push({ qi, r }); }));
+    const figures = items.map(() => []);
+    const order = [...byPage.keys()].sort((a, b) => a - b);
+    for (let k = 0; k < order.length; k++) {
+      const pi = order[k];
+      onProgress('Looking for diagrams on page ' + (pi + 1) + ' of ' + pdf.numPages + '…');
+      const page = await pdf.doc.getPage(pi + 1);
+      const vp = page.getViewport({ scale: SCALE });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(vp.width); canvas.height = Math.ceil(vp.height);
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const gray = new Uint8Array(canvas.width * canvas.height);
+      for (let i = 0, j = 0; i < px.length; i += 4, j++) gray[j] = (px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11) | 0;
+      const textBoxes = pdf.pages[pi].items.map((it) => ({ x0: it.x * SCALE, y0: (it.y - it.h) * SCALE, x1: (it.x + it.w) * SCALE, y1: (it.y + it.h * 0.28) * SCALE }));
+      for (const { qi, r } of byPage.get(pi)) {
+        const boxes = L.findFigures(gray, canvas.width, canvas.height, { x0: r.x0 * SCALE, y0: r.y0 * SCALE, x1: r.x1 * SCALE, y1: r.y1 * SCALE }, textBoxes, SCALE);
+        for (const b of boxes) {
+          const c = document.createElement('canvas');
+          c.width = b.x1 - b.x0; c.height = b.y1 - b.y0;
+          c.getContext('2d').drawImage(canvas, b.x0, b.y0, c.width, c.height, 0, 0, c.width, c.height);
+          const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
+          if (blob) figures[qi].push({ blob, url: URL.createObjectURL(blob), w: c.width, h: c.height });
+        }
+      }
+      page.cleanup();
+      canvas.width = canvas.height = 0;
+    }
+    return figures;
   }
 
   function groupedChapterOptions(selected) {
@@ -1161,12 +1232,25 @@
   async function viewImport() {
     setTitle('Add questions from PDF or text');
     const st = S.imp || (S.imp = { chapter_id: '', difficulty: 'medium', qtype: 'single', source_type: 'own', source_note: '', text: '', parsed: null, fileInfo: null });
-    const isReady = (it) => it.include && it.answer && it.chapter_id && it.body && it.options.every((o) => o.trim());
+    const optImage = (it, i) => (it.figures || []).find((f) => f.assign === i + 1);
+    const optionsFilled = (it) => it.options.every((o, i) => o.trim() || optImage(it, i));
+    const isReady = (it) => it.include && it.answer && it.chapter_id && it.body && optionsFilled(it);
+    // Live checks: these update as the mentor fixes text, assigns pictures or picks the answer.
+    const warningsOf = (it) => {
+      const w = [];
+      if (!it.edited) (it.warnings || []).filter((x) => /options instead of 4/.test(x)).forEach((x) => w.push(x));
+      if (!it.body.trim()) w.push('No question text');
+      const empty = it.options.filter((o, k) => !o.trim() && !optImage(it, k)).length;
+      if (empty) w.push(empty + ' option' + (empty > 1 ? 's' : '') + ' empty');
+      if (!it.answer) w.push('No answer found');
+      return w;
+    };
+    const dropFigures = () => { (st.parsed || []).forEach((it) => (it.figures || []).forEach((f) => URL.revokeObjectURL(f.url))); };
     main().innerHTML =
-      '<div class="page-head"><div><h1>Add questions from a PDF</h1><p class="sub">Upload a question paper, or paste text copied from one. The app splits it into questions; you check each one, set its chapter, and save.</p></div></div>' +
+      '<div class="page-head"><div><h1>Add questions from a PDF</h1><p class="sub">Upload a question paper, or paste text copied from one. The app splits it into questions and cuts out their diagrams and graphs; you check each one, set its chapter, and save.</p></div></div>' +
       '<div class="panel">' +
       '<div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="iPdf" accept="application/pdf,.pdf" hidden>Upload PDF</label>' +
-      '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Answer keys at the end are picked up too.') + '</span></div>' +
+      '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Diagrams, graphs and answer keys are picked up too.') + '</span></div>' +
       '<div id="pdfNote"></div>' +
       '<details style="margin-top:14px"' + (st.text ? ' open' : '') + '><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">Text read from the PDF, or paste your own</summary>' +
       '<textarea id="iText" class="q-input" rows="12" style="margin-top:10px" placeholder="1. The SI unit of force is\n(a) joule\n(b) newton\n(c) watt\n(d) pascal\nAnswer: b\nSolution: F = ma\n\n2. Next question…">' + esc(st.text) + '</textarea>' +
@@ -1195,9 +1279,23 @@
     $('#iText').addEventListener('input', (e) => { st.text = e.target.value; });
 
     function parseNow() {
+      dropFigures();
       const items = L.parsePasted(st.text);
-      st.parsed = items.map((it) => Object.assign(it, { include: it.options.filter((o) => o.trim()).length === 4 && !!it.body, chapter_id: st.chapter_id || '' }));
+      const fourOptions = (it) => !it.warnings.some((w) => /options instead of 4/.test(w));
+      st.parsed = items.map((it) => Object.assign(it, { include: fourOptions(it) && !!it.body, chapter_id: st.chapter_id || '', figures: [] }));
       return items.length;
+    }
+    async function attachFigures() {
+      if (!st.pdf || st.text !== st.pdf.text || !st.parsed || !st.parsed.length) return 0;
+      const figs = await captureFigures(st.pdf, st.parsed, status);
+      let n = 0;
+      st.parsed.forEach((it, i) => {
+        const list = figs[i] || [];
+        const assign = L.assignFigures(it.options, list.length);
+        it.figures = list.map((f, k) => Object.assign(f, { assign: assign[k] }));
+        n += list.length;
+      });
+      return n;
     }
 
     $('#iPdf').addEventListener('change', async (e) => {
@@ -1207,13 +1305,17 @@
       $('#pdfNote').innerHTML = '';
       status('Opening ' + file.name + '…');
       try {
-        const res = await readPdf(file, (n, total) => status('Reading page ' + n + ' of ' + total + '…'));
+        const res = await readPdf(file, status);
+        if (st.pdf && st.pdf.doc) st.pdf.doc.destroy();
+        st.pdf = res;
         st.text = res.text;
         $('#iText').value = st.text;
         const found = parseNow();
-        st.fileInfo = file.name + ': ' + res.pages + ' page' + (res.pages === 1 ? '' : 's') + ', ' + found + ' question' + (found === 1 ? '' : 's') + ' found';
+        let figs = 0;
+        try { figs = await attachFigures(); } catch (err) { console.error(err); toast('Questions were read, but diagrams could not be picked up from this PDF.', 'bad'); }
+        st.fileInfo = file.name + ': ' + res.numPages + ' page' + (res.numPages === 1 ? '' : 's') + ', ' + found + ' question' + (found === 1 ? '' : 's') + (figs ? ', ' + figs + ' diagram' + (figs === 1 ? '' : 's') : '') + ' found';
         status(st.fileInfo);
-        if (res.chars < res.pages * 40) {
+        if (res.chars < res.numPages * 40) {
           $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">This PDF has almost no text in it, so it is probably a scan or photos of pages. The app can only read PDFs made on a computer. Give scanned papers to the admin to add another way.</div>';
         } else if (!found) {
           $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">No numbered questions were found. Open “Text read from the PDF” below to see what was read.</div>';
@@ -1242,19 +1344,53 @@
           '<input type="number" id="rFrom" min="1" style="width:76px" placeholder="from" aria-label="From question number"><span class="small">to</span><input type="number" id="rTo" min="1" style="width:76px" placeholder="to" aria-label="To question number">' +
           '<select id="rChapter" style="max-width:280px" aria-label="Chapter"><option value="">Choose chapter…</option>' + chOpts + '</select><button class="btn sm" data-act="apply-range">Apply</button></div></div>' : '') +
         items.map((it, i) => '<article class="qcard"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + ' section</span>' : '') +
-          (it.warnings.length ? it.warnings.map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : '<span class="chip easy">Looks right</span>') +
+          (warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : '<span class="chip easy">Looks right</span>') +
           '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + '> Include</label></div>' +
-          questionHTML({ body: it.body, options: it.options.map((t) => ({ text: t, image: null })), answer: it.answer, images: [] }, { showAnswer: true }) +
+          questionHTML({ body: it.body, options: it.options.map((t, k) => ({ text: t, image: optImage(it, k) ? optImage(it, k).url : null })), answer: it.answer, images: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.url) }, { showAnswer: true }) +
+          ((it.figures || []).length ? '<div class="fig-pick"><span class="small muted">Diagrams found. Choose where each one goes:</span><div class="fig-row">' + it.figures.map((f, k) =>
+            '<figure class="fig-item' + (f.assign === 'none' ? ' unused' : '') + '"><img src="' + esc(f.url) + '" alt="Diagram ' + (k + 1) + ' from Q' + it.num + '"><select data-fig="' + i + ':' + k + '" aria-label="Where diagram ' + (k + 1) + ' goes">' +
+            [['q', 'In the question'], [1, 'Option 1'], [2, 'Option 2'], [3, 'Option 3'], [4, 'Option 4'], ['none', 'Don’t use']].map(([v, l]) => '<option value="' + v + '"' + (String(f.assign) === String(v) ? ' selected' : '') + '>' + l + '</option>').join('') +
+            '</select></figure>').join('') + '</div></div>' : '') +
           '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
           '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select></div>' +
-          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') + '</article>').join('') +
+          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') +
+          '<details class="fix"' + (it.editing ? ' open' : '') + '><summary data-fixopen="' + i + '">Fix the text</summary><div class="fix-body">' +
+          '<label class="field">Question<textarea class="q-input" rows="3" data-fix="' + i + ':body">' + esc(it.body) + '</textarea></label>' +
+          '<div class="fix-opts">' + it.options.map((o, k) => '<label class="field">Option ' + (k + 1) + '<input type="text" data-fix="' + i + ':' + k + '" value="' + esc(o) + '"' + (optImage(it, k) ? ' placeholder="(picture)"' : '') + '></label>').join('') + '</div>' +
+          '<label class="field">Solution<textarea class="q-input" rows="2" data-fix="' + i + ':solution">' + esc(it.solution || '') + '</textarea></label>' +
+          '<button class="btn sm" data-act="fix-done" data-i="' + i + '">Done</button></div></details>' +
+          '</article>').join('') +
         (ready.length ? '<div class="form-actions"><button class="btn primary" data-act="save-imp">Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' : '') +
-        '<p class="muted small" style="margin-top:12px">Diagrams are not copied from PDFs. After saving, open a question from the bank and paste a screenshot of its diagram.</p>';
+        '<p class="muted small" style="margin-top:12px">Diagrams and graphs are cut out of the PDF automatically. If one is missing or badly cut, save the question anyway, then open it from the bank and paste a screenshot of the diagram.</p>';
       $$('#impPreview input[data-inc]').forEach((c) => c.addEventListener('change', () => { st.parsed[Number(c.dataset.inc)].include = c.checked; renderPreview(); }));
       $$('#impPreview input[data-ans]').forEach((r) => r.addEventListener('change', () => { const it = st.parsed[Number(r.dataset.ans)]; it.answer = Number(r.value); it.warnings = it.warnings.filter((w) => w !== 'No answer found'); renderPreview(); }));
       $$('#impPreview select[data-ich]').forEach((sel) => sel.addEventListener('change', () => { st.parsed[Number(sel.dataset.ich)].chapter_id = Number(sel.value) || ''; renderPreview(); }));
+      $$('#impPreview [data-fix]').forEach((el) => {
+        const [i, key] = el.dataset.fix.split(':');
+        const it = st.parsed[Number(i)];
+        el.addEventListener('input', () => {
+          it.edited = true;
+          if (key === 'body') it.body = el.value; else if (key === 'solution') it.solution = el.value; else it.options[Number(key)] = el.value;
+        });
+      });
+      $$('#impPreview summary[data-fixopen]').forEach((sm) => sm.addEventListener('click', () => { const it = st.parsed[Number(sm.dataset.fixopen)]; it.editing = !sm.parentNode.open; }));
+      $$('#impPreview select[data-fig]').forEach((sel) => sel.addEventListener('change', () => {
+        const [i, k] = sel.dataset.fig.split(':').map(Number);
+        const it = st.parsed[i];
+        const v = /^\d$/.test(sel.value) ? Number(sel.value) : sel.value;
+        if (typeof v === 'number') it.figures.forEach((f, j) => { if (j !== k && f.assign === v) f.assign = 'q'; });
+        it.figures[k].assign = v;
+        const y = window.scrollY; renderPreview(); window.scrollTo(0, y);
+      }));
+      hydrateImages(box);
     }
 
+    S.actions['fix-done'] = (btn) => {
+      const it = st.parsed[Number(btn.dataset.i)];
+      it.editing = false;
+      if (it.edited && it.body.trim() && it.options.every((o, k) => o.trim() || optImage(it, k))) it.include = true;
+      const y = window.scrollY; renderPreview(); window.scrollTo(0, y);
+    };
     S.actions['apply-range'] = () => {
       const from = Number($('#rFrom').value), to = Number($('#rTo').value) || from, ch = Number($('#rChapter').value);
       if (!from || !ch) { toast('Enter the question numbers and choose a chapter.', 'bad'); return; }
@@ -1263,9 +1399,13 @@
       toast(n + ' question' + (n === 1 ? '' : 's') + ' set to ' + chapterName(ch));
       renderPreview();
     };
-    S.actions.parse = () => {
+    S.actions.parse = async () => {
       const n = parseNow();
       if (!n) { toast('No questions found. Check that each starts with a number.', 'bad'); return; }
+      if (st.pdf) {
+        if (st.text === st.pdf.text) { try { await attachFigures(); } catch (e) { console.error(e); } status(st.fileInfo || ''); }
+        else toast('You changed the text, so diagrams from the PDF were left out. Add them by editing the questions after saving.');
+      }
       renderPreview();
       $('#impPreview').scrollIntoView({ behavior: 'smooth' });
     };
@@ -1274,17 +1414,29 @@
       if (!ready.length) return;
       busy(b, true, 'Saving…');
       try {
-        const n = await Api.insertQuestions(ready.map((it) => ({
-          chapter_id: it.chapter_id, qtype: st.qtype, difficulty: st.difficulty, body: it.body,
-          options: it.options.map((t) => ({ text: t.trim(), image: null })), answer: it.answer, solution: it.solution || null,
-          images: [], source_type: st.source_type, source_note: st.source_note.trim() || null,
-        })));
+        const used = ready.flatMap((it) => (it.figures || []).filter((f) => f.assign !== 'none' && !f.path));
+        for (let k = 0; k < used.length; k++) {
+          b.textContent = 'Uploading diagrams ' + (k + 1) + ' of ' + used.length + '…';
+          used[k].path = await uploadFile(new File([used[k].blob], 'diagram.png', { type: 'image/png' }));
+        }
+        b.textContent = 'Saving…';
+        const n = await Api.insertQuestions(ready.map((it) => {
+          const figs = (it.figures || []).filter((f) => f.assign !== 'none');
+          return {
+            chapter_id: it.chapter_id, qtype: st.qtype, difficulty: st.difficulty, body: it.body,
+            options: it.options.map((t, k) => { const f = figs.find((x) => x.assign === k + 1); return { text: t.trim(), image: f ? f.path : null }; }),
+            answer: it.answer, solution: it.solution || null,
+            images: figs.filter((f) => f.assign === 'q').map((f) => f.path), source_type: st.source_type, source_note: st.source_note.trim() || null,
+          };
+        }));
         invalidateMeta();
         const chapters = [...new Set(ready.map((it) => it.chapter_id))];
         toast(n + ' question' + (n === 1 ? '' : 's') + ' added to the bank');
         S.bank = Object.assign(S.bank, { subject: '', chapter: chapters.length === 1 ? String(chapters[0]) : '', page: 0, search: '', mine: true, samples: false, archived: false });
         if (chapters.length === 1) S.bank.subject = String((S.chapterById.get(chapters[0]) || {}).subject_id || '');
-        st.text = ''; st.parsed = null; st.fileInfo = null;
+        dropFigures();
+        if (st.pdf && st.pdf.doc) st.pdf.doc.destroy();
+        st.text = ''; st.parsed = null; st.fileInfo = null; st.pdf = null;
         location.hash = '#/bank';
       } catch (e) { fail(e); busy(b, false); }
     };

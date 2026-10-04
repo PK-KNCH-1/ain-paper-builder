@@ -286,14 +286,17 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .rich .katex { font-size: 1.04em; }
 .q-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .q-imgs img { max-height: 220px; border-radius: 4px; background: #fff; }
-ol.opts { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px 18px; }
-ol.opts.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-ol.opts.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-ol.opts li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: baseline; font-family: var(--font-q); }
-ol.opts li .on { font-family: var(--font-q); font-weight: 600; }
+/* Options flow in rows of 4, 2 or 1. Items never shrink below their content, so wide maths wraps to a new row instead of overlapping. */
+ol.opts { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+ol.opts li { flex: 1 0 100%; display: flex; gap: 6px; align-items: baseline; font-family: var(--font-q); }
+ol.opts.g2 li { flex-basis: calc(50% - 18px); }
+ol.opts.g4 li { flex-basis: calc(25% - 18px); }
+ol.opts li > span:last-child { min-width: 0; }
+ol.opts li.img-opt { align-items: flex-start; }
+ol.opts li .on { font-family: var(--font-q); font-weight: 600; white-space: nowrap; }
 ol.opts li.correct { color: var(--good); font-weight: 600; }
-ol.opts li img { max-height: 110px; display: block; background: #fff; border-radius: 3px; }
-@media (max-width: 560px) { ol.opts.g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+ol.opts li.correct.img-opt img { outline: 2px solid var(--good); outline-offset: 2px; }
+ol.opts li img { max-height: 120px; display: block; background: #fff; border-radius: 3px; }
 
 /* ---------- Bank ---------- */
 .filters { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); align-items: end; margin-bottom: 14px; }
@@ -364,6 +367,7 @@ ol.opts li img { max-height: 110px; display: block; background: #fff; border-rad
 .sheet .rich { font-size: 10.5pt; }
 .sheet .rich th, .sheet .rich td { border-color: #777; }
 .sheet ol.opts li.correct { color: inherit; }
+.sheet ol.opts li.correct.img-opt img { outline: none; }
 .sheet .q-imgs img, .sheet ol.opts li img { background: transparent; }
 .sheet-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 2px solid var(--ink-p); padding-bottom: 8px; }
 .org { display: flex; gap: 10px; align-items: center; }
@@ -381,20 +385,25 @@ ol.opts li img { max-height: 110px; display: block; background: #fff; border-rad
 .instructions ol { margin: 0; padding-left: 16px; }
 .qcols { column-count: 2; column-gap: 8mm; column-rule: .5pt solid var(--paper-line); }
 @media (max-width: 700px) { .qcols { column-count: 1; } }
-.subj { column-span: all; font: 800 9.5pt var(--font-ui); letter-spacing: .16em; text-transform: uppercase; text-align: center; background: #ececec; padding: 3px 0; margin: 6px 0 8px; break-after: avoid; }
-.pq { break-inside: avoid; display: grid; grid-template-columns: 24px minmax(0, 1fr); margin-bottom: 9px; }
+/* Each question is one unbreakable inline block, so it never splits across columns or pages.
+   (Chrome pushes whole column sets to the next page when items use break-inside: avoid.)
+   A subject heading sits inside its first question, so it can never be left alone at the bottom of a column. */
+.subj { grid-column: 1 / -1; font: 800 9.5pt var(--font-ui); letter-spacing: .16em; text-transform: uppercase; text-align: center; background: #ececec; padding: 3px 0; margin: 2px 0 8px; }
+.pq { display: inline-grid; width: 100%; vertical-align: top; grid-template-columns: 24px minmax(0, 1fr); margin-bottom: 9px; }
 .pq .qn { font-weight: 700; }
-.pq ol.opts { gap: 2px 10px; margin-top: 4px; }
+.pq ol.opts { gap: 3px 12px; margin-top: 4px; }
+.pq ol.opts.g2 li { flex-basis: calc(50% - 12px); }
+.pq ol.opts.g4 li { flex-basis: calc(25% - 12px); }
 .pq ol.opts li { gap: 4px; }
-.pq .q-imgs img { max-height: 55mm; }
-.pq ol.opts li img { max-height: 30mm; }
+.pq .q-imgs img { max-height: 48mm; }
+.pq ol.opts li img { max-height: 28mm; }
 .sheet-foot { margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--paper-line); display: flex; justify-content: space-between; font: 500 8pt var(--font-ui); color: #555; }
 .end-mark { text-align: center; font: 700 8.5pt var(--font-ui); letter-spacing: .3em; margin-top: 10px; column-span: all; }
 .key-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0 10px; margin-top: 12px; font: 500 10pt var(--font-mono); }
 @media (max-width: 640px) { .key-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .key-grid div { display: flex; justify-content: space-between; border-bottom: 1px dotted #999; padding: 3px 4px; }
 .key-grid div b { font-weight: 700; }
-.sol-item { break-inside: avoid; padding: 7px 0; border-bottom: 1px dotted #aaa; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; }
+.sol-item { padding: 7px 0; border-bottom: 1px dotted #aaa; display: inline-grid; width: 100%; vertical-align: top; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; }
 .sol-item .ans { font: 700 9pt var(--font-ui); margin-bottom: 2px; }
 
 @page { size: A4; margin: 11mm 10mm 13mm; }
@@ -410,3 +419,15 @@ ol.opts li img { max-height: 110px; display: block; background: #fff; border-rad
   .sheet-foot { display: none; }
   a { color: inherit; text-decoration: none; }
 }
+
+/* Diagrams found in an uploaded PDF */
+.fig-pick { margin-top: 10px; padding: 10px; border: 1px dashed var(--line-strong); border-radius: var(--r-sm); background: var(--surface-2); }
+.fig-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.fig-item { margin: 0; display: grid; gap: 6px; justify-items: start; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px; }
+.fig-item img { max-height: 90px; max-width: 160px; background: #fff; }
+.fig-item select { font-size: .8rem; padding: 4px 6px; width: auto; }
+.fig-item.unused img { opacity: .35; }
+.fix { margin-top: 8px; }
+.fix > summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: .85rem; }
+.fix-body { display: grid; gap: 10px; margin-top: 10px; }
+.fix-opts { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
