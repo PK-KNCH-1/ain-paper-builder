@@ -292,6 +292,9 @@ ol.opts li { flex: 1 0 100%; display: flex; gap: 6px; align-items: baseline; fon
 ol.opts.g2 li { flex-basis: calc(50% - 18px); }
 ol.opts.g4 li { flex-basis: calc(25% - 18px); }
 ol.opts li > span:last-child { min-width: 0; }
+/* In rows of 4 or 2 an option never breaks across lines; if one does not fit, fitOptions() moves to fewer per row,
+   and only the one-per-row layout lets long options wrap. */
+ol.opts.g4 li, ol.opts.g2 li { white-space: nowrap; }
 ol.opts li.img-opt { align-items: flex-start; }
 ol.opts li .on { font-family: var(--font-q); font-weight: 600; white-space: nowrap; }
 ol.opts li.correct { color: var(--good); font-weight: 600; }
@@ -389,7 +392,8 @@ ol.opts li img { max-height: 120px; display: block; background: #fff; border-rad
    (Chrome pushes whole column sets to the next page when items use break-inside: avoid.)
    A subject heading sits inside its first question, so it can never be left alone at the bottom of a column. */
 .subj { grid-column: 1 / -1; font: 800 9.5pt var(--font-ui); letter-spacing: .16em; text-transform: uppercase; text-align: center; background: #ececec; padding: 3px 0; margin: 2px 0 8px; }
-.pq { display: inline-grid; width: 100%; vertical-align: top; grid-template-columns: 24px minmax(0, 1fr); margin-bottom: 9px; }
+.pq { display: inline-grid; width: 100%; vertical-align: top; grid-template-columns: auto minmax(0, 1fr); margin-bottom: 9px; }
+.pq .qn { min-width: 20px; padding-right: 5px; }
 .pq .qn { font-weight: 700; }
 .pq ol.opts { gap: 3px 12px; margin-top: 4px; }
 .pq ol.opts.g2 li { flex-basis: calc(50% - 12px); }
