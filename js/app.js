@@ -12,6 +12,36 @@
   const DIFFS = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--omr)" stroke="var(--omr)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
+  // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
+  const APP_BUILD = 7;
+  function browserLabel() {
+    const ua = navigator.userAgent || '';
+    const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    const dev = ipad ? 'iPad' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'Mac' : /CrOS/.test(ua) ? 'Chromebook' : /Linux/.test(ua) ? 'Linux' : 'unknown device';
+    const m = ua.match(/(Edg|EdgiOS|OPR|SamsungBrowser|CriOS|FxiOS|Firefox|Chrome)\/([\d.]+)/);
+    const names = { Edg: 'Edge', EdgiOS: 'Edge', OPR: 'Opera', SamsungBrowser: 'Samsung Internet', CriOS: 'Chrome', FxiOS: 'Firefox', Firefox: 'Firefox', Chrome: 'Chrome' };
+    const safari = ua.match(/Version\/([\d.]+).*Safari/);
+    const ios = ua.match(/OS (\d+)_(\d+)/);
+    const name = m ? names[m[1]] + ' ' + m[2].split('.')[0] : safari ? 'Safari ' + safari[1] : /AppleWebKit/.test(ua) ? 'in-app browser' : 'browser';
+    return name + ' on ' + dev + (ios && (ipad || /iPhone/.test(ua)) ? ' (iOS ' + ios[1] + '.' + ios[2] + ')' : '');
+  }
+  let updateShown = false;
+  async function checkForUpdate() {
+    if (updateShown || location.protocol === 'file:') return;
+    try {
+      const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const v = await r.json();
+      if (!(Number(v.build) > APP_BUILD)) return;
+      updateShown = true;
+      const bar = document.createElement('div');
+      bar.className = 'update-bar no-print';
+      bar.innerHTML = '<span>A newer version of this website is ready.</span><button class="btn sm primary" type="button">Reload now</button>';
+      bar.querySelector('button').addEventListener('click', () => location.reload());
+      document.body.appendChild(bar);
+    } catch (e) { /* offline or blocked: try again later */ }
+  }
+
   const S = {
     session: null,
     me: null,
@@ -1172,6 +1202,20 @@
     return pdfjsPromise;
   }
 
+  // Same as page.getTextContent(), but reads the stream with a reader instead of `for await`, which older Safari can't do.
+  async function textContentOf(page) {
+    if (typeof page.streamTextContent !== 'function') return page.getTextContent();
+    const reader = page.streamTextContent().getReader();
+    const out = { items: [], styles: {} };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const it of value.items) out.items.push(it);
+      Object.assign(out.styles, value.styles);
+    }
+    return out;
+  }
+
   async function readPdf(file, onProgress) {
     const lib = await loadPdfJs();
     const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
@@ -1181,7 +1225,7 @@
       onProgress('Reading page ' + n + ' of ' + doc.numPages + '…');
       const page = await doc.getPage(n);
       const vp = page.getViewport({ scale: 1 });
-      const tc = await page.getTextContent();
+      const tc = await textContentOf(page);
       const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => ({ s: it.str, x: it.transform[4], y: vp.height - it.transform[5], w: it.width, h: Math.abs(it.transform[3]) || Math.abs(it.transform[1]) || 10 }));
       chars += items.reduce((k, it) => k + it.s.trim().length, 0);
       pages.push({ width: vp.width, height: vp.height, items });
@@ -1253,7 +1297,7 @@
     main().innerHTML =
       '<div class="page-head"><div><h1>Add questions from a PDF</h1><p class="sub">Upload a question paper, or paste text copied from one. The app splits it into questions and cuts out their diagrams and graphs; you check each one, set its chapter, and save.</p></div></div>' +
       '<div class="panel">' +
-      '<div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="iPdf" accept="application/pdf,.pdf" hidden>Upload PDF</label>' +
+      '<div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="iPdf" accept="application/pdf,.pdf,.json,application/json" hidden>Upload PDF</label>' +
       '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Diagrams, graphs and answer keys are picked up too.') + '</span>' +
       '<span class="spacer"></span><a class="btn" href="#/import/file">Add a question file</a></div>' +
       '<div id="pdfNote"></div>' +
@@ -1307,6 +1351,12 @@
       const file = e.target.files[0];
       e.target.value = '';
       if (!file) return;
+      if (isQuestionFile(file)) {
+        status('Reading ' + file.name + '…');
+        try { S.impFile = await loadQuestionFile(file); location.hash = '#/import/file'; }
+        catch (err) { status('Could not use that file.'); fail(err); }
+        return;
+      }
       $('#pdfNote').innerHTML = '';
       status('Opening ' + file.name + '…');
       try {
@@ -1333,7 +1383,7 @@
         const msg = String((err && err.message) || err);
         if (/password/i.test(msg)) fail(new Error('That PDF is password-protected. Remove the password and try again.'));
         else if (/Invalid PDF|corrupt|unexpected/i.test(msg)) fail(new Error('That file does not look like a working PDF. Try saving or exporting it again.'));
-        else fail(new Error('This browser could not read the PDF (' + msg + '). Try again in Chrome, or send the file to the admin.'));
+        else fail(new Error('This browser (' + browserLabel() + ', website version ' + APP_BUILD + ') could not read the PDF: ' + msg + '. Reload the page and try again; if it still fails, send a screenshot of this message to the admin.'));
       }
     });
 
@@ -1487,13 +1537,26 @@
     });
   }
 
+  function isQuestionFile(file) { return /\.json$/i.test(file.name || '') || /json/i.test(file.type || ''); }
+  async function loadQuestionFile(file) {
+    let data;
+    try { data = JSON.parse((await file.text()).replace(/^\uFEFF/, '')); }
+    catch (err) {
+      if (/^%PDF/.test(await file.slice(0, 5).text().catch(() => ''))) throw new Error('That is a PDF. Use Add from PDF for PDFs; this page is for question files (.json) from Claude.');
+      throw new Error('That file could not be read as a question file. Make sure it is the .json file from Claude, not opened and re-saved.');
+    }
+    const items = checkQuestionSet(data);
+    const taken = await Api.sourceNotesTaken(items.map((it) => it.row.source_note));
+    return { name: file.name, title: String(data.title || file.name), items, taken, shown: 20 };
+  }
+
   async function viewImportFile(token) {
     setTitle('Add a question file');
     const st = S.impFile || (S.impFile = { name: '', title: '', items: null, taken: new Set(), shown: 20 });
     main().innerHTML =
       '<div class="page-head"><div><h1>Add a question file</h1><p class="sub">Scanned papers can’t be read by the website, so Claude types them up and sends back a question file (.json) with the text, diagrams, chapters and answers. Upload it here, check it, and add it to the bank.</p></div>' +
       '<a class="btn" href="#/import">Back to PDF import</a></div>' +
-      '<div class="panel"><div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="qsFile" accept=".json,application/json" hidden>Upload question file</label>' +
+      '<div class="panel"><div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="qsFile" hidden>Upload question file</label>' +
       '<span class="muted small" id="qsStatus">' + (st.name ? esc(st.name) : 'Choose the .json file Claude sent you.') + '</span></div></div>' +
       '<section id="qsPreview" class="section"></section>';
 
@@ -1503,15 +1566,15 @@
       if (!file) return;
       $('#qsStatus').textContent = 'Reading ' + file.name + '…';
       try {
-        let data;
-        try { data = JSON.parse(await file.text()); } catch (err) { throw new Error('That file could not be read as a question file. Make sure it is the .json file from Claude, not opened and re-saved.'); }
-        const items = checkQuestionSet(data);
-        const taken = await Api.sourceNotesTaken(items.map((it) => it.row.source_note));
+        const res = await loadQuestionFile(file);
         if (stale(token)) return;
-        Object.assign(st, { name: file.name, title: String(data.title || file.name), items, taken, shown: 20 });
-        $('#qsStatus').textContent = file.name + ': ' + items.length + ' question' + (items.length === 1 ? '' : 's');
+        Object.assign(st, res);
+        $('#qsStatus').textContent = file.name + ': ' + st.items.length + ' question' + (st.items.length === 1 ? '' : 's');
         render();
-      } catch (err) { $('#qsStatus').textContent = 'Could not use that file.'; fail(err); }
+      } catch (err) {
+        $('#qsStatus').textContent = 'Could not use that file.';
+        fail(/could not be read|not a question file|is a PDF/.test(err.message) ? err : new Error(err.message + ' (' + browserLabel() + ', website version ' + APP_BUILD + ')'));
+      }
     });
 
     const isNew = (it) => !(it.row.source_note && st.taken.has(it.row.source_note));
@@ -1762,7 +1825,8 @@
       '<form class="panel" id="pwForm" novalidate><h2 style="margin-bottom:12px">Change password</h2><div class="stack" style="gap:12px">' +
       '<label class="field">New password<span class="hint">At least 8 characters</span><input id="aPw1" type="password" autocomplete="new-password"></label>' +
       '<label class="field">Type it again<input id="aPw2" type="password" autocomplete="new-password"></label></div>' +
-      '<div class="form-actions"><button class="btn primary" type="submit" id="aPwBtn">Change password</button></div></form></div>';
+      '<div class="form-actions"><button class="btn primary" type="submit" id="aPwBtn">Change password</button></div></form>' +
+      '<p class="muted small">Website version ' + APP_BUILD + ' · ' + esc(browserLabel()) + '</p></div>';
     S.actions.signout = async () => { await Api.signOut(); S.session = null; S.me = null; S.loaded = false; S.builder = {}; S.qcache.clear(); S.meta = null; location.hash = '#/'; route(); };
     $('#nameForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1793,6 +1857,9 @@
     });
     window.addEventListener('hashchange', route);
     route();
+    checkForUpdate();
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
+    setInterval(checkForUpdate, 10 * 60000);
   }
   window.__app = { S, route };
   boot();

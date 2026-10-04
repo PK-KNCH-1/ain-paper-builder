@@ -185,6 +185,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .empty h2 { color: var(--ink); margin-bottom: 6px; }
 .empty .btn { margin-top: 14px; }
 
+.update-bar { position: fixed; left: 50%; top: calc(10px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: var(--r-sm); background: var(--ink); color: var(--bg); box-shadow: var(--shadow); font-size: .9rem; width: max-content; max-width: calc(100vw - 32px); }
 .toast-wrap { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 50; display: grid; gap: 8px; width: min(92vw, 420px); }
 .toast { background: var(--ink); color: var(--bg); padding: 11px 14px; border-radius: var(--r-sm); font-size: .9rem; box-shadow: var(--shadow); }
 .toast.bad { background: var(--bad); color: #fff; }
