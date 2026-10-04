@@ -140,6 +140,14 @@
       }
       return n;
     },
+    // Which of these source notes are already used by questions in the bank (to skip re-importing the same file).
+    async sourceNotesTaken(notes) {
+      const taken = new Set();
+      for (const part of chunks([...new Set(notes.filter(Boolean))], 100)) {
+        (unwrap(await client().from('questions').select('source_note').in('source_note', part)) || []).forEach((r) => taken.add(r.source_note));
+      }
+      return taken;
+    },
     async setArchived(id, archived) { unwrap(await client().from('questions').update({ archived }).eq('id', id)); },
     async deleteQuestion(id) { unwrap(await client().from('questions').delete().eq('id', id)); },
     async deleteSamples() { unwrap(await client().from('questions').delete().eq('is_sample', true)); },

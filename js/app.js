@@ -271,6 +271,7 @@
     [/^#\/q\/new$/, 'bank', (token) => viewEditor(null, token)],
     [/^#\/q\/([\w-]+)$/, 'bank', viewEditor],
     [/^#\/import$/, 'import', viewImport],
+    [/^#\/import\/file$/, 'import', viewImportFile],
     [/^#\/admin$/, 'admin', viewAdmin],
     [/^#\/account$/, '', viewAccount],
   ];
@@ -1253,7 +1254,8 @@
       '<div class="page-head"><div><h1>Add questions from a PDF</h1><p class="sub">Upload a question paper, or paste text copied from one. The app splits it into questions and cuts out their diagrams and graphs; you check each one, set its chapter, and save.</p></div></div>' +
       '<div class="panel">' +
       '<div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="iPdf" accept="application/pdf,.pdf" hidden>Upload PDF</label>' +
-      '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Diagrams, graphs and answer keys are picked up too.') + '</span></div>' +
+      '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Diagrams, graphs and answer keys are picked up too.') + '</span>' +
+      '<span class="spacer"></span><a class="btn" href="#/import/file">Add a question file</a></div>' +
       '<div id="pdfNote"></div>' +
       '<details style="margin-top:14px"' + (st.text ? ' open' : '') + '><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">Text read from the PDF, or paste your own</summary>' +
       '<textarea id="iText" class="q-input" rows="12" style="margin-top:10px" placeholder="1. The SI unit of force is\n(a) joule\n(b) newton\n(c) watt\n(d) pascal\nAnswer: b\nSolution: F = ma\n\n2. Next question…">' + esc(st.text) + '</textarea>' +
@@ -1319,7 +1321,7 @@
         st.fileInfo = file.name + ': ' + res.numPages + ' page' + (res.numPages === 1 ? '' : 's') + ', ' + found + ' question' + (found === 1 ? '' : 's') + (figs ? ', ' + figs + ' diagram' + (figs === 1 ? '' : 's') : '') + ' found';
         status(st.fileInfo);
         if (res.chars < res.numPages * 40) {
-          $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">This PDF has almost no text in it, so it is probably a scan or photos of pages. The app can only read PDFs made on a computer. Give scanned papers to the admin to add another way.</div>';
+          $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">This PDF has almost no text in it, so it is probably a scan or photos of pages. The app can only read PDFs made on a computer. Scanned papers can be typed up by Claude, which gives you a question file to add with <a href="#/import/file">Add a question file</a>.</div>';
         } else if (!found) {
           $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">No numbered questions were found. Open “Text read from the PDF” below to see what was read.</div>';
         }
@@ -1448,6 +1450,146 @@
       } catch (e) { fail(e); busy(b, false); }
     };
     renderPreview();
+  }
+
+  /* ================= Question files (typed up by Claude from scanned papers) ================= */
+
+  // File format: { format: 'ain-question-set', version: 1, title, source_type, questions: [
+  //   { subject, chapter, qtype, difficulty, body, options: [{ text, image }], answer, solution, images: [dataURL], source_note, archived } ] }
+  // Pictures arrive as data URLs and are uploaded to storage on save, like any other question image.
+  function checkQuestionSet(data) {
+    if (!data || data.format !== 'ain-question-set' || !Array.isArray(data.questions)) throw new Error('This is not a question file. Question files end in .json and come from Claude.');
+    const norm = (t) => String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const subjectByName = new Map(S.subjects.map((x) => [norm(x.name), x]));
+    const setSource = SOURCES[data.source_type] ? data.source_type : 'other';
+    return data.questions.map((q, i) => {
+      const problems = [];
+      const subj = subjectByName.get(norm(q.subject));
+      const ch = subj && S.chapters.find((c) => c.subject_id === subj.id && norm(c.name) === norm(q.chapter));
+      if (!subj) problems.push('Unknown subject “' + (q.subject || '') + '”');
+      else if (!ch) problems.push('Chapter “' + (q.chapter || '') + '” is not in ' + subj.name);
+      const options = (Array.isArray(q.options) ? q.options : []).map((o) => (typeof o === 'string' ? { text: o, image: null } : { text: String((o && o.text) || ''), image: (o && o.image) || null }));
+      if (options.length !== 4) problems.push(options.length + ' options instead of 4');
+      else if (options.some((o) => !o.text.trim() && !o.image)) problems.push('An option is empty');
+      const answer = Number(q.answer);
+      if (!(answer >= 1 && answer <= 4)) problems.push('No correct option');
+      if (!String(q.body || '').trim()) problems.push('No question text');
+      const pics = [...(q.images || []), ...options.map((o) => o.image).filter(Boolean)];
+      if (pics.some((p) => !/^data:image\/(png|jpeg|webp);base64,/.test(p))) problems.push('A picture is in an unknown format');
+      return {
+        n: i + 1, problems, chapter_id: ch ? ch.id : null, subject_id: subj ? subj.id : null,
+        row: {
+          chapter_id: ch ? ch.id : null, topic: String(q.topic || ''), qtype: QTYPES[q.qtype] ? q.qtype : 'single', difficulty: DIFFS[q.difficulty] ? q.difficulty : 'medium',
+          body: String(q.body || ''), options, answer, solution: q.solution ? String(q.solution) : null, images: (q.images || []).slice(),
+          source_type: SOURCES[q.source_type] ? q.source_type : setSource, source_note: String(q.source_note || data.title || '').trim() || null, archived: !!q.archived,
+        },
+      };
+    });
+  }
+
+  async function viewImportFile(token) {
+    setTitle('Add a question file');
+    const st = S.impFile || (S.impFile = { name: '', title: '', items: null, taken: new Set(), shown: 20 });
+    main().innerHTML =
+      '<div class="page-head"><div><h1>Add a question file</h1><p class="sub">Scanned papers can’t be read by the website, so Claude types them up and sends back a question file (.json) with the text, diagrams, chapters and answers. Upload it here, check it, and add it to the bank.</p></div>' +
+      '<a class="btn" href="#/import">Back to PDF import</a></div>' +
+      '<div class="panel"><div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="qsFile" accept=".json,application/json" hidden>Upload question file</label>' +
+      '<span class="muted small" id="qsStatus">' + (st.name ? esc(st.name) : 'Choose the .json file Claude sent you.') + '</span></div></div>' +
+      '<section id="qsPreview" class="section"></section>';
+
+    $('#qsFile').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      $('#qsStatus').textContent = 'Reading ' + file.name + '…';
+      try {
+        let data;
+        try { data = JSON.parse(await file.text()); } catch (err) { throw new Error('That file could not be read as a question file. Make sure it is the .json file from Claude, not opened and re-saved.'); }
+        const items = checkQuestionSet(data);
+        const taken = await Api.sourceNotesTaken(items.map((it) => it.row.source_note));
+        if (stale(token)) return;
+        Object.assign(st, { name: file.name, title: String(data.title || file.name), items, taken, shown: 20 });
+        $('#qsStatus').textContent = file.name + ': ' + items.length + ' question' + (items.length === 1 ? '' : 's');
+        render();
+      } catch (err) { $('#qsStatus').textContent = 'Could not use that file.'; fail(err); }
+    });
+
+    const isNew = (it) => !(it.row.source_note && st.taken.has(it.row.source_note));
+    const toSave = () => (st.items || []).filter((it) => !it.problems.length && isNew(it));
+
+    function render() {
+      const box = $('#qsPreview');
+      if (!st.items) { box.innerHTML = ''; return; }
+      const items = st.items, ready = toSave();
+      const bad = items.filter((it) => it.problems.length), dup = items.filter((it) => !isNew(it));
+      const pics = (r) => r.images.length + r.options.filter((o) => o.image).length;
+      const bySubject = S.subjects.map((sub) => {
+        const list = ready.filter((it) => it.subject_id === sub.id);
+        return { sub, n: list.length, figs: list.reduce((a, it) => a + pics(it.row), 0), chapters: new Set(list.map((it) => it.chapter_id)).size, arch: list.filter((it) => it.row.archived).length };
+      }).filter((x) => x.n);
+      const diff = (d) => ready.filter((it) => it.row.difficulty === d).length;
+      box.innerHTML =
+        '<div class="draft-head"><div><h2>' + esc(st.title) + '</h2><p class="muted small" style="margin-top:4px">' + ready.length + ' ready to add' +
+        (dup.length ? ' · ' + dup.length + ' already in the bank (skipped)' : '') + (bad.length ? ' · ' + bad.length + ' with problems (skipped)' : '') + '</p></div>' +
+        '<button class="btn primary" data-act="qs-save"' + (ready.length ? '' : ' disabled') + '>Add ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' +
+        (dup.length && !ready.length && !bad.length ? '<div class="notice good" style="margin-bottom:12px">Every question in this file is already in the bank.</div>' : '') +
+        (bad.length ? '<div class="notice warn" style="margin-bottom:12px"><b>These were left out:</b><ul>' + bad.slice(0, 12).map((it) => '<li>Question ' + it.n + ': ' + esc(it.problems.join(', ')) + '</li>').join('') + (bad.length > 12 ? '<li>…and ' + (bad.length - 12) + ' more</li>' : '') + '</ul></div>' : '') +
+        (bySubject.length ? '<div class="table-wrap" style="margin-bottom:8px"><table class="data"><thead><tr><th>Subject</th><th class="num">Questions</th><th class="num">Chapters</th><th class="num">Diagrams</th></tr></thead><tbody>' +
+          bySubject.map((x) => '<tr><td>' + esc(x.sub.name) + '</td><td class="num">' + x.n + '</td><td class="num">' + x.chapters + '</td><td class="num">' + x.figs + '</td></tr>').join('') + '</tbody></table></div>' +
+          '<p class="muted small" style="margin:0 0 16px">Difficulty: ' + diff('easy') + ' easy, ' + diff('medium') + ' medium, ' + diff('hard') + ' hard.' +
+          (ready.some((it) => it.row.archived) ? ' ' + ready.filter((it) => it.row.archived).length + ' will be added as archived (see their solutions for why); they stay out of papers until you un-archive them.' : '') + '</p>' : '') +
+        '<div id="qsList">' + ready.slice(0, st.shown).map((it) => '<article class="qcard"><div class="meta"><b>' + esc(it.row.source_note || ('Question ' + it.n)) + '</b> · ' + esc(chapterName(it.chapter_id)) + ' ' + chipDiff(it.row.difficulty) +
+          '<span class="chip">' + esc(QTYPES[it.row.qtype]) + '</span>' + (it.row.archived ? '<span class="chip">Will be archived</span>' : '') + '</div>' +
+          questionHTML(it.row, { showAnswer: true }) + (it.row.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.row.solution) + '</div></details>' : '') + '</article>').join('') + '</div>' +
+        (ready.length > st.shown ? '<div class="form-actions"><button class="btn" data-act="qs-more">Show ' + Math.min(40, ready.length - st.shown) + ' more (' + (ready.length - st.shown) + ' not shown)</button></div>' : '');
+      hydrateImages(box);
+    }
+
+    S.actions['qs-more'] = () => { st.shown += 40; const y = window.scrollY; render(); window.scrollTo(0, y); };
+    S.actions['qs-save'] = async (b) => {
+      const ready = toSave();
+      if (!ready.length) return;
+      busy(b, true, 'Adding…');
+      let added = 0;
+      try {
+        // In groups, so a dropped connection keeps what was already added; uploading the file again skips those.
+        const groups = [];
+        for (let i = 0; i < ready.length; i += 20) groups.push(ready.slice(i, i + 20));
+        const totalPics = ready.reduce((a, it) => a + it.row.images.length + it.row.options.filter((o) => o.image).length, 0);
+        let done = 0;
+        const put = async (dataUrl) => {
+          done++;
+          b.textContent = 'Uploading diagrams ' + done + ' of ' + totalPics + '…';
+          const blob = await (await fetch(dataUrl)).blob();
+          return uploadFile(new File([blob], 'diagram.' + (blob.type === 'image/jpeg' ? 'jpg' : 'png'), { type: blob.type || 'image/png' }));
+        };
+        for (const g of groups) {
+          const rows = [];
+          for (const it of g) {
+            const r = Object.assign({}, it.row);
+            r.images = [];
+            for (const im of it.row.images) r.images.push(await put(im));
+            r.options = [];
+            for (const o of it.row.options) r.options.push({ text: o.text.trim(), image: o.image ? await put(o.image) : null });
+            rows.push(r);
+          }
+          b.textContent = 'Saving questions ' + (added + 1) + '–' + (added + rows.length) + ' of ' + ready.length + '…';
+          added += await Api.insertQuestions(rows);
+          g.forEach((it) => st.taken.add(it.row.source_note));
+        }
+        invalidateMeta();
+        toast(added + ' question' + (added === 1 ? '' : 's') + ' added to the bank');
+        S.impFile = null;
+        S.bank = Object.assign(S.bank, { subject: '', chapter: '', page: 0, search: '', mine: false, samples: false, archived: false, source: ready[0].row.source_type });
+        location.hash = '#/bank';
+      } catch (e) {
+        invalidateMeta();
+        fail(new Error((added ? added + ' questions were added before this stopped. Upload the same file again to add the rest. ' : '') + ((e && e.message) || e)));
+        busy(b, false);
+        render();
+      }
+    };
+    render();
   }
 
   /* ================= Admin ================= */
