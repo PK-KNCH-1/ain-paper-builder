@@ -10,10 +10,10 @@
   const QTYPES = { single: 'Single correct', assertion: 'Assertion–Reason', statement: 'Two statements', match: 'Match the lists', other: 'Other' };
   const SOURCES = { own: 'Our own', pyq: 'NEET previous year', book: 'Book', institute: 'Other institute', other: 'Other' };
   const DIFFS = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
-  const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--omr)" stroke="var(--omr)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
+  const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 7;
+  const APP_BUILD = 8;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);

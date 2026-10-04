@@ -1,29 +1,35 @@
 /* AIN Paper Builder
    Layout: a calm working tool. Top bar + one content column; the printed paper is a white A4 sheet in every theme.
-   World: exam halls. Ballpoint-blue ink for actions, OMR-sheet magenta for marked bubbles, serif type for questions. */
+   Palette: peacock and antique gold. A deep peacock top bar carries the brand (the one bold surface); peacock ink for
+   actions, antique gold for marked OMR bubbles and the logo; cool porcelain greys everywhere else. Serif type for questions. */
 :root {
-  --bg: #f2f4f8;
+  --bg: #f1f4f4;
   --surface: #ffffff;
-  --surface-2: #f7f8fb;
-  --ink: #141c2f;
-  --muted: #5a6478;
-  --line: #dde2ea;
-  --line-strong: #c3cad7;
-  --accent: #2443b8;
+  --surface-2: #f6f8f8;
+  --ink: #0f2529;
+  --muted: #55686c;
+  --line: #dae2e3;
+  --line-strong: #bfcccd;
+  --accent: #0b4f5b;
   --accent-ink: #ffffff;
-  --accent-soft: #e8edfb;
-  --omr: #c42f66;
-  --omr-soft: #fbe9f0;
-  --good: #1d7a4a;
-  --good-soft: #e2f3e9;
-  --warn: #8f5500;
-  --warn-soft: #fbf0db;
+  --accent-soft: #e0edef;
+  --omr: #82611f;
+  --omr-soft: #f6efdf;
+  --gold: #c9a45c;
+  --good: #1f7848;
+  --good-soft: #e1f2e7;
+  --warn: #8a5200;
+  --warn-soft: #faefd9;
   --bad: #b3261e;
   --bad-soft: #fbe7e5;
+  --bar: #0c3139;
+  --bar-ink: #e6f0f1;
+  --bar-muted: #9db9bd;
+  --bar-line: transparent;
   --paper: #ffffff;
   --paper-ink: #111418;
   --paper-line: #9aa0a8;
-  --shadow: 0 1px 2px rgba(20, 28, 47, .06), 0 6px 24px rgba(20, 28, 47, .06);
+  --shadow: 0 1px 2px rgba(12, 49, 57, .06), 0 6px 24px rgba(12, 49, 57, .07);
 
   --font-ui: "Public Sans", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
   --font-q: "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
@@ -34,18 +40,20 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0e131d; --surface: #151c29; --surface-2: #1a2233; --ink: #e5eaf3; --muted: #9ba6bb;
-    --line: #263045; --line-strong: #36425c; --accent: #8ea5ff; --accent-ink: #0c1220; --accent-soft: #1d2748;
-    --omr: #ff7aa8; --omr-soft: #3b1a2a; --good: #63cd94; --good-soft: #142e20; --warn: #f1b44f; --warn-soft: #33270f;
-    --bad: #ff8b82; --bad-soft: #3b1a18; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.35);
+    --bg: #0a1a1d; --surface: #0f2428; --surface-2: #132c31; --ink: #e3eeef; --muted: #93aaae;
+    --line: #1d3a40; --line-strong: #2b4d54; --accent: #62adb8; --accent-ink: #06181c; --accent-soft: #123940;
+    --omr: #e2bc6e; --omr-soft: #33280f; --gold: #d8b46c; --good: #63cd94; --good-soft: #142e20; --warn: #f1b44f; --warn-soft: #33270f;
+    --bad: #ff8b82; --bad-soft: #3b1a18; --bar: #071417; --bar-ink: #e3eeef; --bar-muted: #8fa8ac; --bar-line: #1d3a40;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.35);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #0e131d; --surface: #151c29; --surface-2: #1a2233; --ink: #e5eaf3; --muted: #9ba6bb;
-  --line: #263045; --line-strong: #36425c; --accent: #8ea5ff; --accent-ink: #0c1220; --accent-soft: #1d2748;
-  --omr: #ff7aa8; --omr-soft: #3b1a2a; --good: #63cd94; --good-soft: #142e20; --warn: #f1b44f; --warn-soft: #33270f;
-  --bad: #ff8b82; --bad-soft: #3b1a18; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.35);
+  --bg: #0a1a1d; --surface: #0f2428; --surface-2: #132c31; --ink: #e3eeef; --muted: #93aaae;
+  --line: #1d3a40; --line-strong: #2b4d54; --accent: #62adb8; --accent-ink: #06181c; --accent-soft: #123940;
+  --omr: #e2bc6e; --omr-soft: #33280f; --gold: #d8b46c; --good: #63cd94; --good-soft: #142e20; --warn: #f1b44f; --warn-soft: #33270f;
+  --bad: #ff8b82; --bad-soft: #3b1a18; --bar: #071417; --bar-ink: #e3eeef; --bar-muted: #8fa8ac; --bar-line: #1d3a40;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 28px rgba(0,0,0,.35);
   color-scheme: dark;
 }
 
@@ -75,31 +83,33 @@ p { margin: 0; }
 /* ---------- Top bar ---------- */
 .topbar {
   position: sticky; top: 0; z-index: 20;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
+  background: var(--bar);
+  border-bottom: 1px solid var(--bar-line);
   padding-top: env(safe-area-inset-top, 0px);
 }
 .topbar-inner {
   max-width: 1180px; margin: 0 auto; padding: 0 16px;
   display: flex; align-items: center; gap: 20px; min-height: 58px; flex-wrap: wrap;
 }
-.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); font-weight: 700; letter-spacing: -.01em; }
-.brand .mark { width: 54px; height: 17px; color: var(--ink); }
-.brand small { display: block; font-weight: 500; color: var(--muted); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--bar-ink); font-weight: 700; letter-spacing: -.01em; }
+.brand .mark { width: 54px; height: 17px; color: var(--bar-ink); }
+.brand small { display: block; font-weight: 500; color: var(--bar-muted); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
 .nav { display: flex; gap: 4px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .nav a {
-  text-decoration: none; color: var(--muted); font-weight: 600; font-size: .92rem;
+  text-decoration: none; color: var(--bar-muted); font-weight: 600; font-size: .92rem;
   padding: 8px 12px; border-radius: var(--r-sm); white-space: nowrap;
 }
-.nav a:hover { color: var(--ink); background: var(--surface-2); }
-.nav a.active { color: var(--accent); background: var(--accent-soft); }
+.nav a:hover { color: var(--bar-ink); background: rgba(255, 255, 255, .06); }
+.nav a.active { color: var(--gold); background: color-mix(in srgb, var(--gold) 14%, transparent); }
 .nav .ns { display: none; }
-.who { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); font-size: .9rem; font-weight: 600; }
+.who { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--bar-ink); font-size: .9rem; font-weight: 600; }
 .avatar {
   width: 32px; height: 32px; border-radius: 50%; flex: none;
   display: grid; place-items: center; font-size: .78rem; font-weight: 700; letter-spacing: .02em;
   background: var(--accent-soft); color: var(--accent);
 }
+.topbar .avatar { background: color-mix(in srgb, var(--gold) 18%, var(--bar)); color: var(--gold); }
+.topbar :focus-visible { outline-color: var(--gold); }
 @media (max-width: 720px) {
   .topbar-inner { gap: 6px 12px; padding-block: 8px; }
   .nav { order: 3; flex-basis: 100%; }
@@ -185,7 +195,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .empty h2 { color: var(--ink); margin-bottom: 6px; }
 .empty .btn { margin-top: 14px; }
 
-.update-bar { position: fixed; left: 50%; top: calc(10px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: var(--r-sm); background: var(--ink); color: var(--bg); box-shadow: var(--shadow); font-size: .9rem; width: max-content; max-width: calc(100vw - 32px); }
+.update-bar { position: fixed; left: 50%; top: calc(10px + env(safe-area-inset-top, 0px)); transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 16px; border-radius: var(--r-sm); background: var(--bar); color: var(--bar-ink); border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent); box-shadow: var(--shadow); font-size: .9rem; width: max-content; max-width: calc(100vw - 32px); }
 .toast-wrap { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 50; display: grid; gap: 8px; width: min(92vw, 420px); }
 .toast { background: var(--ink); color: var(--bg); padding: 11px 14px; border-radius: var(--r-sm); font-size: .9rem; box-shadow: var(--shadow); }
 .toast.bad { background: var(--bad); color: #fff; }
@@ -202,6 +212,8 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 
 /* ---------- Auth ---------- */
 .auth { min-height: calc(100vh - 80px); display: grid; place-items: center; padding: 32px 0; }
+body:has(.auth) { background: var(--bar); }
+body:has(.auth) .auth-card { border-color: transparent; box-shadow: 0 2px 6px rgba(0,0,0,.18), 0 24px 60px rgba(0,0,0,.28); }
 .auth-card { width: min(100%, 420px); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 28px; box-shadow: var(--shadow); }
 .auth-brand { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
 .auth-brand .mark { width: 70px; height: 22px; color: var(--ink); }
