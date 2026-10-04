@@ -13,7 +13,7 @@
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 8;
+  const APP_BUILD = 9;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -25,6 +25,40 @@
     const name = m ? names[m[1]] + ' ' + m[2].split('.')[0] : safari ? 'Safari ' + safari[1] : /AppleWebKit/.test(ua) ? 'in-app browser' : 'browser';
     return name + ' on ' + dev + (ios && (ipad || /iPhone/.test(ua)) ? ' (iOS ' + ios[1] + '.' + ios[2] + ')' : '');
   }
+  /* Light / dark: 'system' follows the phone or computer setting; 'light' or 'dark' is kept on this device.
+     index.html applies a saved choice before the page draws, so there is no flash. */
+  const THEME_KEY = 'ain-theme';
+  const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function themeChoice() { try { const t = localStorage.getItem(THEME_KEY); return t === 'light' || t === 'dark' ? t : 'system'; } catch (e) { return 'system'; } }
+  function isDark() { const t = document.documentElement.getAttribute('data-theme'); return t ? t === 'dark' : !!(darkQuery && darkQuery.matches); }
+  function setTheme(choice) {
+    try { if (choice === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, choice); } catch (e) { /* private mode: still switch for this visit */ }
+    if (choice === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', choice);
+    themeChanged();
+  }
+  const SUN_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>';
+  const MOON_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg>';
+  function themeButtonHTML() {
+    const dark = isDark();
+    return '<button type="button" class="theme-btn" id="themeBtn" aria-label="' + (dark ? 'Switch to light mode' : 'Switch to dark mode') + '" title="' + (dark ? 'Light mode' : 'Dark mode') + '">' + (dark ? SUN_SVG : MOON_SVG) + '</button>';
+  }
+  function themeChanged() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) { btn.outerHTML = themeButtonHTML(); bindThemeButton(); }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', isDark() ? '#071417' : '#0c3139');
+    document.querySelectorAll('input[name="themeChoice"]').forEach((r) => { r.checked = r.value === themeChoice(); });
+  }
+  function bindThemeButton() {
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.addEventListener('click', () => setTheme(isDark() ? 'light' : 'dark'));
+  }
+  if (darkQuery) {
+    const onSystemChange = () => { if (themeChoice() === 'system') themeChanged(); };
+    if (darkQuery.addEventListener) darkQuery.addEventListener('change', onSystemChange); else if (darkQuery.addListener) darkQuery.addListener(onSystemChange);
+  }
+
   let updateShown = false;
   async function checkForUpdate() {
     if (updateShown || location.protocol === 'file:') return;
@@ -254,8 +288,10 @@
       '<a href="#/import" data-nav="import"><span class="nl">Add from PDF</span><span class="ns">PDF</span></a>' +
       (isAdmin() ? '<a href="#/admin" data-nav="admin">Admin</a>' : '') +
       '</nav>' +
-      '<a class="who" href="#/account" title="Your account"><span class="avatar">' + esc(initials(S.me.full_name || S.me.email)) + '</span><span class="who-name">' + esc(S.me.full_name || S.me.email) + '</span></a>' +
+      '<div class="bar-end">' + themeButtonHTML() +
+      '<a class="who" href="#/account" title="Your account"><span class="avatar">' + esc(initials(S.me.full_name || S.me.email)) + '</span><span class="who-name">' + esc(S.me.full_name || S.me.email) + '</span></a></div>' +
       '</div>';
+    bindThemeButton();
   }
   function setActiveNav(key) {
     $$('#topbar [data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === key));
@@ -1826,8 +1862,12 @@
       '<label class="field">New password<span class="hint">At least 8 characters</span><input id="aPw1" type="password" autocomplete="new-password"></label>' +
       '<label class="field">Type it again<input id="aPw2" type="password" autocomplete="new-password"></label></div>' +
       '<div class="form-actions"><button class="btn primary" type="submit" id="aPwBtn">Change password</button></div></form>' +
+      '<div class="panel"><h2 style="margin-bottom:6px">Appearance</h2><p class="muted small" style="margin-bottom:12px">Saved on this device. Printed papers are always black on white.</p>' +
+      '<div class="seg" role="radiogroup" aria-label="Appearance">' + [['system', 'Same as this device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) =>
+        '<label><input type="radio" name="themeChoice" value="' + v + '"' + (themeChoice() === v ? ' checked' : '') + '><span>' + l + '</span></label>').join('') + '</div></div>' +
       '<p class="muted small">Website version ' + APP_BUILD + ' · ' + esc(browserLabel()) + '</p></div>';
     S.actions.signout = async () => { await Api.signOut(); S.session = null; S.me = null; S.loaded = false; S.builder = {}; S.qcache.clear(); S.meta = null; location.hash = '#/'; route(); };
+    $$('input[name="themeChoice"]').forEach((r) => r.addEventListener('change', () => { if (r.checked) setTheme(r.value); }));
     $('#nameForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const n = $('#aName').value.trim();
