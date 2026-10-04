@@ -1160,10 +1160,13 @@
   function loadPdfJs() {
     if (!pdfjsPromise) {
       const base = new URL((window.APP_VENDOR_BASE || 'vendor/') + 'pdfjs/', document.baseURI).href;
-      pdfjsPromise = import(base + 'pdf.min.js').then((lib) => {
-        lib.GlobalWorkerOptions.workerSrc = base + 'pdf.worker.min.js';
-        return lib;
-      }).catch((e) => { pdfjsPromise = null; throw new Error('Could not load the PDF reader. Check the internet connection and try again.'); });
+      pdfjsPromise = import(base + 'stream-polyfill.js')
+        .then(() => import(base + 'pdf.min.js'))
+        .then((lib) => {
+          lib.GlobalWorkerOptions.workerSrc = base + 'pdf.worker.shim.js';
+          return lib;
+        })
+        .catch((e) => { console.error(e); pdfjsPromise = null; throw new Error('Could not load the PDF reader. Check the internet connection and try again.'); });
     }
     return pdfjsPromise;
   }
@@ -1323,8 +1326,12 @@
         renderPreview();
         if (found) $('#impPreview').scrollIntoView({ behavior: 'smooth' });
       } catch (err) {
+        console.error(err);
         status('Could not read that file.');
-        fail(/password/i.test(err && err.message) ? new Error('That PDF is password-protected. Remove the password and try again.') : err);
+        const msg = String((err && err.message) || err);
+        if (/password/i.test(msg)) fail(new Error('That PDF is password-protected. Remove the password and try again.'));
+        else if (/Invalid PDF|corrupt|unexpected/i.test(msg)) fail(new Error('That file does not look like a working PDF. Try saving or exporting it again.'));
+        else fail(new Error('This browser could not read the PDF (' + msg + '). Try again in Chrome, or send the file to the admin.'));
       }
     });
 
