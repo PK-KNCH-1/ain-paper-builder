@@ -13,7 +13,7 @@
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 9;
+  const APP_BUILD = 10;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -338,6 +338,7 @@
     [/^#\/q\/([\w-]+)$/, 'bank', viewEditor],
     [/^#\/import$/, 'import', viewImport],
     [/^#\/import\/file$/, 'import', viewImportFile],
+    [/^#\/import\/ai$/, 'import', viewImportAi],
     [/^#\/admin$/, 'admin', viewAdmin],
     [/^#\/account$/, '', viewAccount],
   ];
@@ -1221,6 +1222,163 @@
     preview();
   }
 
+  /* ================= Checking imported questions before saving ================= */
+  // Shared by "Add from PDF" and "Convert with AI". st.parsed holds the questions:
+  // { num, body, options: [4 strings], answer, solution, warnings, include, chapter_id, figures: [{ blob, url, assign, ... }],
+  //   and optionally subject, difficulty, qtype, note (source note), dup, pages, touched }.
+
+  function dropItemFigures(items) { (items || []).forEach((it) => (it.figures || []).forEach((f) => { if (f.url) URL.revokeObjectURL(f.url); })); }
+
+  function importReview(st, hooks) {
+    const h = hooks || {};
+    const optImage = (it, i) => (it.figures || []).find((f) => f.assign === i + 1);
+    const optionsFilled = (it) => it.options.every((o, i) => o.trim() || optImage(it, i));
+    const isReady = (it) => it.include && !it.dup && it.answer && it.chapter_id && it.body && optionsFilled(it);
+    // Live checks: these update as the mentor fixes text, assigns pictures or picks the answer.
+    const warningsOf = (it) => {
+      const w = [];
+      if (!it.edited) (it.warnings || []).filter((x) => /options instead of 4|earlier page|disagree/.test(x)).forEach((x) => w.push(x));
+      if (!it.body.trim()) w.push('No question text');
+      const empty = it.options.filter((o, k) => !o.trim() && !optImage(it, k)).length;
+      if (empty) w.push(empty + ' option' + (empty > 1 ? 's' : '') + ' empty');
+      if (!it.answer) w.push('No answer found');
+      return w;
+    };
+    const touch = (it) => { it.touched = true; };
+    const rerender = () => { const y = window.scrollY; render(); window.scrollTo(0, y); };
+
+    function render() {
+      const box = $('#impPreview');
+      if (!box) return;
+      if (!st.parsed) { box.innerHTML = ''; return; }
+      const items = st.parsed;
+      const ready = items.filter(isReady);
+      const noChapter = items.filter((it) => it.include && !it.dup && !it.chapter_id).length;
+      const noAnswer = items.filter((it) => it.include && !it.dup && !it.answer).length;
+      const dups = items.filter((it) => it.dup).length;
+      const chOpts = groupedChapterOptions('');
+      box.innerHTML =
+        '<div class="draft-head"><div><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
+        '<p class="muted small" style="margin-top:4px">' + ready.length + ' ready to save' + (noChapter ? ' · ' + noChapter + ' need a chapter' : '') + (noAnswer ? ' · ' + noAnswer + ' need the correct option' : '') +
+        (dups ? ' · ' + dups + ' already in the bank' : '') + '</p></div>' +
+        '<button class="btn primary" data-act="save-imp"' + (ready.length ? '' : ' disabled') + '>Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' +
+        (h.intro ? h.intro() : '') +
+        (items.length > 1 ? '<div class="panel" style="margin-bottom:12px"><div class="row" style="gap:8px"><b class="small">Set chapter for questions</b>' +
+          '<input type="number" id="rFrom" min="1" style="width:76px" placeholder="from" aria-label="From question number"><span class="small">to</span><input type="number" id="rTo" min="1" style="width:76px" placeholder="to" aria-label="To question number">' +
+          '<select id="rChapter" style="max-width:280px" aria-label="Chapter"><option value="">Choose chapter…</option>' + chOpts + '</select><button class="btn sm" data-act="apply-range">Apply</button></div></div>' : '') +
+        items.map((it, i) => '<article class="qcard' + (it.dup ? ' is-dup' : '') + '"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + '</span>' : '') +
+          (it.pages && it.pages.length ? '<span class="chip">' + esc(it.pages.join(' + ')) + '</span>' : '') +
+          (it.dup ? '<span class="chip">Already in the bank</span>' : warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : '<span class="chip easy">Looks right</span>') +
+          '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + (it.dup ? ' disabled' : '') + '> Include</label></div>' +
+          questionHTML({ body: it.body, options: it.options.map((t, k) => ({ text: t, image: optImage(it, k) ? optImage(it, k).url : null })), answer: it.answer, images: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.url) }, { showAnswer: true }) +
+          ((it.figures || []).length ? '<div class="fig-pick"><span class="small muted">Diagrams found. Choose where each one goes:</span><div class="fig-row">' + it.figures.map((f, k) =>
+            '<figure class="fig-item' + (f.assign === 'none' ? ' unused' : '') + '"><img src="' + esc(f.url) + '" alt="Diagram ' + (k + 1) + ' from Q' + it.num + '"><select data-fig="' + i + ':' + k + '" aria-label="Where diagram ' + (k + 1) + ' goes">' +
+            [['q', 'In the question'], [1, 'Option 1'], [2, 'Option 2'], [3, 'Option 3'], [4, 'Option 4'], ['none', 'Don’t use']].map(([v, l]) => '<option value="' + v + '"' + (String(f.assign) === String(v) ? ' selected' : '') + '>' + l + '</option>').join('') +
+            '</select>' + (h.recrop && f.box ? '<span class="fig-adj"><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':-1" aria-label="Crop diagram ' + (k + 1) + ' tighter"' + ((f.pad || 0) <= -1 ? ' disabled' : '') + '>Tighter</button><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':1" aria-label="Crop diagram ' + (k + 1) + ' wider"' + ((f.pad || 0) >= 4 ? ' disabled' : '') + '>Wider</button></span>' : '') +
+            '</figure>').join('') + '</div></div>' : '') +
+          '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
+          '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select>' +
+          (it.difficulty ? '<select data-idiff="' + i + '" aria-label="Difficulty for Q' + it.num + '" style="max-width:120px">' + mapOptions(DIFFS, it.difficulty) + '</select>' : '') + '</div>' +
+          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') +
+          (h.compare && it.scan ? '<details class="scan-cmp" data-cmp="' + i + '"><summary>Compare with the scan</summary><div class="scan-body muted small">Loading…</div></details>' : '') +
+          '<details class="fix"' + (it.editing ? ' open' : '') + '><summary data-fixopen="' + i + '">Fix the text</summary><div class="fix-body">' +
+          '<label class="field">Question<textarea class="q-input" rows="3" data-fix="' + i + ':body">' + esc(it.body) + '</textarea></label>' +
+          '<div class="fix-opts">' + it.options.map((o, k) => '<label class="field">Option ' + (k + 1) + '<input type="text" data-fix="' + i + ':' + k + '" value="' + esc(o) + '"' + (optImage(it, k) ? ' placeholder="(picture)"' : '') + '></label>').join('') + '</div>' +
+          '<label class="field">Solution<textarea class="q-input" rows="2" data-fix="' + i + ':solution">' + esc(it.solution || '') + '</textarea></label>' +
+          '<button class="btn sm" data-act="fix-done" data-i="' + i + '">Done</button></div></details>' +
+          '</article>').join('') +
+        (ready.length ? '<div class="form-actions"><button class="btn primary" data-act="save-imp">Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' : '') +
+        '<p class="muted small" style="margin-top:12px">' + (h.footnote || 'Diagrams and graphs are cut out of the PDF automatically. If one is missing or badly cut, save the question anyway, then open it from the bank and paste a screenshot of the diagram.') + '</p>';
+      $$('#impPreview input[data-inc]').forEach((c) => c.addEventListener('change', () => { const it = st.parsed[Number(c.dataset.inc)]; it.include = c.checked; touch(it); render(); }));
+      $$('#impPreview input[data-ans]').forEach((r) => r.addEventListener('change', () => { const it = st.parsed[Number(r.dataset.ans)]; it.answer = Number(r.value); it.warnings = (it.warnings || []).filter((w) => w !== 'No answer found' && !/disagree/.test(w)); touch(it); rerender(); }));
+      $$('#impPreview select[data-ich]').forEach((sel) => sel.addEventListener('change', () => { const it = st.parsed[Number(sel.dataset.ich)]; it.chapter_id = Number(sel.value) || ''; touch(it); rerender(); }));
+      $$('#impPreview select[data-idiff]').forEach((sel) => sel.addEventListener('change', () => { const it = st.parsed[Number(sel.dataset.idiff)]; it.difficulty = sel.value; touch(it); }));
+      $$('#impPreview [data-fix]').forEach((el) => {
+        const [i, key] = el.dataset.fix.split(':');
+        const it = st.parsed[Number(i)];
+        el.addEventListener('input', () => {
+          it.edited = true; touch(it);
+          if (key === 'body') it.body = el.value; else if (key === 'solution') it.solution = el.value; else it.options[Number(key)] = el.value;
+        });
+      });
+      $$('#impPreview summary[data-fixopen]').forEach((sm) => sm.addEventListener('click', () => { const it = st.parsed[Number(sm.dataset.fixopen)]; it.editing = !sm.parentNode.open; }));
+      $$('#impPreview select[data-fig]').forEach((sel) => sel.addEventListener('change', () => {
+        const [i, k] = sel.dataset.fig.split(':').map(Number);
+        const it = st.parsed[i];
+        const v = /^\d$/.test(sel.value) ? Number(sel.value) : sel.value;
+        if (typeof v === 'number') it.figures.forEach((f, j) => { if (j !== k && f.assign === v) f.assign = 'q'; });
+        it.figures[k].assign = v;
+        touch(it);
+        rerender();
+      }));
+      $$('#impPreview details[data-cmp]').forEach((d) => d.addEventListener('toggle', () => { if (d.open && !d.dataset.done) { d.dataset.done = '1'; h.compare(st.parsed[Number(d.dataset.cmp)], $('.scan-body', d)); } }));
+      hydrateImages(box);
+      if (h.afterRender) h.afterRender(box);
+    }
+
+    S.actions['fix-done'] = (btn) => {
+      const it = st.parsed[Number(btn.dataset.i)];
+      it.editing = false;
+      if (it.edited && it.body.trim() && it.options.every((o, k) => o.trim() || optImage(it, k)) && !it.dup) it.include = true;
+      rerender();
+    };
+    S.actions['fig-pad'] = async (btn) => {
+      const [i, k, d] = btn.dataset.f.split(':').map(Number);
+      const it = st.parsed[i], f = it.figures[k];
+      busy(btn, true);
+      try { await h.recrop(f, Math.max(-1, Math.min(4, (f.pad || 0) + d))); touch(it); rerender(); }
+      catch (e) { fail(e); busy(btn, false); }
+    };
+    S.actions['apply-range'] = () => {
+      const from = Number($('#rFrom').value), to = Number($('#rTo').value) || from, ch = Number($('#rChapter').value);
+      if (!from || !ch) { toast('Enter the question numbers and choose a chapter.', 'bad'); return; }
+      let n = 0;
+      st.parsed.forEach((it) => { if (it.num >= Math.min(from, to) && it.num <= Math.max(from, to)) { it.chapter_id = ch; touch(it); n++; } });
+      toast(n + ' question' + (n === 1 ? '' : 's') + ' set to ' + chapterName(ch));
+      render();
+    };
+    S.actions['save-imp'] = async (b) => {
+      let ready = st.parsed.filter(isReady);
+      if (!ready.length) return;
+      busy(b, true, 'Saving…');
+      try {
+        if (h.noteFor) {
+          // Number each question's source so the same paper is never added twice, even from another device.
+          ready.forEach((it) => { it.note = h.noteFor(it); });
+          const taken = await Api.sourceNotesTaken(ready.map((it) => it.note));
+          ready.forEach((it) => { if (it.note && taken.has(it.note)) { it.dup = true; it.include = false; } });
+          ready = ready.filter((it) => !it.dup);
+          if (!ready.length) { busy(b, false); toast('These questions are already in the bank.', 'bad'); render(); return; }
+        }
+        const used = ready.flatMap((it) => (it.figures || []).filter((f) => f.assign !== 'none' && !f.path));
+        for (let k = 0; k < used.length; k++) {
+          b.textContent = 'Uploading diagrams ' + (k + 1) + ' of ' + used.length + '…';
+          used[k].path = await uploadFile(new File([used[k].blob], 'diagram.png', { type: 'image/png' }));
+        }
+        b.textContent = 'Saving…';
+        const n = await Api.insertQuestions(ready.map((it) => {
+          const figs = (it.figures || []).filter((f) => f.assign !== 'none');
+          return {
+            chapter_id: it.chapter_id, qtype: it.qtype || st.qtype, difficulty: it.difficulty || st.difficulty, body: it.body,
+            options: it.options.map((t, k) => { const f = figs.find((x) => x.assign === k + 1); return { text: t.trim(), image: f ? f.path : null }; }),
+            answer: it.answer, solution: it.solution || null,
+            images: figs.filter((f) => f.assign === 'q').map((f) => f.path), source_type: st.source_type,
+            source_note: h.noteFor ? it.note : (st.source_note.trim() || null),
+          };
+        }));
+        invalidateMeta();
+        const chapters = [...new Set(ready.map((it) => it.chapter_id))];
+        toast(n + ' question' + (n === 1 ? '' : 's') + ' added to the bank');
+        S.bank = Object.assign(S.bank, { subject: '', chapter: chapters.length === 1 ? String(chapters[0]) : '', page: 0, search: '', mine: true, samples: false, archived: false });
+        if (chapters.length === 1) S.bank.subject = String((S.chapterById.get(chapters[0]) || {}).subject_id || '');
+        const left = st.parsed.filter((it) => !ready.includes(it));
+        if (h.onSaved && h.onSaved(ready, left) === 'stay') { busy(b, false); render(); window.scrollTo(0, $('#impPreview').offsetTop - 80); return; }
+        location.hash = '#/bank';
+      } catch (e) { fail(e); busy(b, false); }
+    };
+    return { render, isReady };
+  }
+
   /* ================= Add from PDF or text ================= */
 
   let pdfjsPromise = null;
@@ -1316,26 +1474,13 @@
   async function viewImport() {
     setTitle('Add questions from PDF or text');
     const st = S.imp || (S.imp = { chapter_id: '', difficulty: 'medium', qtype: 'single', source_type: 'own', source_note: '', text: '', parsed: null, fileInfo: null });
-    const optImage = (it, i) => (it.figures || []).find((f) => f.assign === i + 1);
-    const optionsFilled = (it) => it.options.every((o, i) => o.trim() || optImage(it, i));
-    const isReady = (it) => it.include && it.answer && it.chapter_id && it.body && optionsFilled(it);
-    // Live checks: these update as the mentor fixes text, assigns pictures or picks the answer.
-    const warningsOf = (it) => {
-      const w = [];
-      if (!it.edited) (it.warnings || []).filter((x) => /options instead of 4/.test(x)).forEach((x) => w.push(x));
-      if (!it.body.trim()) w.push('No question text');
-      const empty = it.options.filter((o, k) => !o.trim() && !optImage(it, k)).length;
-      if (empty) w.push(empty + ' option' + (empty > 1 ? 's' : '') + ' empty');
-      if (!it.answer) w.push('No answer found');
-      return w;
-    };
-    const dropFigures = () => { (st.parsed || []).forEach((it) => (it.figures || []).forEach((f) => URL.revokeObjectURL(f.url))); };
+    const dropFigures = () => dropItemFigures(st.parsed);
     main().innerHTML =
       '<div class="page-head"><div><h1>Add questions from a PDF</h1><p class="sub">Upload a question paper, or paste text copied from one. The app splits it into questions and cuts out their diagrams and graphs; you check each one, set its chapter, and save.</p></div></div>' +
       '<div class="panel">' +
       '<div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="iPdf" accept="application/pdf,.pdf,.json,application/json" hidden>Upload PDF</label>' +
       '<span class="muted small" id="pdfStatus">' + (st.fileInfo ? esc(st.fileInfo) : 'Works with PDFs made on a computer (text you can select). Diagrams, graphs and answer keys are picked up too.') + '</span>' +
-      '<span class="spacer"></span><a class="btn" href="#/import/file">Add a question file</a></div>' +
+      '<span class="spacer"></span><a class="btn" href="#/import/ai">Scanned paper? Convert with AI</a><a class="btn" href="#/import/file">Add a question file</a></div>' +
       '<div id="pdfNote"></div>' +
       '<details style="margin-top:14px"' + (st.text ? ' open' : '') + '><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">Text read from the PDF, or paste your own</summary>' +
       '<textarea id="iText" class="q-input" rows="12" style="margin-top:10px" placeholder="1. The SI unit of force is\n(a) joule\n(b) newton\n(c) watt\n(d) pascal\nAnswer: b\nSolution: F = ma\n\n2. Next question…">' + esc(st.text) + '</textarea>' +
@@ -1355,7 +1500,7 @@
       const prev = st.chapter_id;
       st.chapter_id = Number(e.target.value) || '';
       if (st.parsed) st.parsed.forEach((it) => { if (!it.chapter_id || it.chapter_id === prev) it.chapter_id = st.chapter_id; });
-      renderPreview();
+      review.render();
     });
     $('#iDiff').addEventListener('change', (e) => { st.difficulty = e.target.value; });
     $('#iType').addEventListener('change', (e) => { st.qtype = e.target.value; });
@@ -1407,11 +1552,13 @@
         st.fileInfo = file.name + ': ' + res.numPages + ' page' + (res.numPages === 1 ? '' : 's') + ', ' + found + ' question' + (found === 1 ? '' : 's') + (figs ? ', ' + figs + ' diagram' + (figs === 1 ? '' : 's') : '') + ' found';
         status(st.fileInfo);
         if (res.chars < res.numPages * 40) {
-          $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">This PDF has almost no text in it, so it is probably a scan or photos of pages. The app can only read PDFs made on a computer. Scanned papers can be typed up by Claude, which gives you a question file to add with <a href="#/import/file">Add a question file</a>.</div>';
+          st.lastFile = file;
+          $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px"><b>This looks like a scan or photos of pages.</b> It has almost no text in it, so this page can’t read it. ' +
+            '<button class="btn sm primary" data-act="to-ai" style="margin-left:6px">Convert it with AI</button></div>';
         } else if (!found) {
           $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">No numbered questions were found. Open “Text read from the PDF” below to see what was read.</div>';
         }
-        renderPreview();
+        review.render();
         if (found) $('#impPreview').scrollIntoView({ behavior: 'smooth' });
       } catch (err) {
         console.error(err);
@@ -1423,77 +1570,9 @@
       }
     });
 
-    function renderPreview() {
-      const box = $('#impPreview');
-      if (!st.parsed) { box.innerHTML = ''; return; }
-      const items = st.parsed;
-      const ready = items.filter(isReady);
-      const noChapter = items.filter((it) => it.include && !it.chapter_id).length;
-      const noAnswer = items.filter((it) => it.include && !it.answer).length;
-      const chOpts = groupedChapterOptions('');
-      box.innerHTML =
-        '<div class="draft-head"><div><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
-        '<p class="muted small" style="margin-top:4px">' + ready.length + ' ready to save' + (noChapter ? ' · ' + noChapter + ' need a chapter' : '') + (noAnswer ? ' · ' + noAnswer + ' need the correct option' : '') + '</p></div>' +
-        '<button class="btn primary" data-act="save-imp"' + (ready.length ? '' : ' disabled') + '>Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' +
-        (items.length > 1 ? '<div class="panel" style="margin-bottom:12px"><div class="row" style="gap:8px"><b class="small">Set chapter for questions</b>' +
-          '<input type="number" id="rFrom" min="1" style="width:76px" placeholder="from" aria-label="From question number"><span class="small">to</span><input type="number" id="rTo" min="1" style="width:76px" placeholder="to" aria-label="To question number">' +
-          '<select id="rChapter" style="max-width:280px" aria-label="Chapter"><option value="">Choose chapter…</option>' + chOpts + '</select><button class="btn sm" data-act="apply-range">Apply</button></div></div>' : '') +
-        items.map((it, i) => '<article class="qcard"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + ' section</span>' : '') +
-          (warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : '<span class="chip easy">Looks right</span>') +
-          '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + '> Include</label></div>' +
-          questionHTML({ body: it.body, options: it.options.map((t, k) => ({ text: t, image: optImage(it, k) ? optImage(it, k).url : null })), answer: it.answer, images: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.url) }, { showAnswer: true }) +
-          ((it.figures || []).length ? '<div class="fig-pick"><span class="small muted">Diagrams found. Choose where each one goes:</span><div class="fig-row">' + it.figures.map((f, k) =>
-            '<figure class="fig-item' + (f.assign === 'none' ? ' unused' : '') + '"><img src="' + esc(f.url) + '" alt="Diagram ' + (k + 1) + ' from Q' + it.num + '"><select data-fig="' + i + ':' + k + '" aria-label="Where diagram ' + (k + 1) + ' goes">' +
-            [['q', 'In the question'], [1, 'Option 1'], [2, 'Option 2'], [3, 'Option 3'], [4, 'Option 4'], ['none', 'Don’t use']].map(([v, l]) => '<option value="' + v + '"' + (String(f.assign) === String(v) ? ' selected' : '') + '>' + l + '</option>').join('') +
-            '</select></figure>').join('') + '</div></div>' : '') +
-          '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
-          '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select></div>' +
-          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') +
-          '<details class="fix"' + (it.editing ? ' open' : '') + '><summary data-fixopen="' + i + '">Fix the text</summary><div class="fix-body">' +
-          '<label class="field">Question<textarea class="q-input" rows="3" data-fix="' + i + ':body">' + esc(it.body) + '</textarea></label>' +
-          '<div class="fix-opts">' + it.options.map((o, k) => '<label class="field">Option ' + (k + 1) + '<input type="text" data-fix="' + i + ':' + k + '" value="' + esc(o) + '"' + (optImage(it, k) ? ' placeholder="(picture)"' : '') + '></label>').join('') + '</div>' +
-          '<label class="field">Solution<textarea class="q-input" rows="2" data-fix="' + i + ':solution">' + esc(it.solution || '') + '</textarea></label>' +
-          '<button class="btn sm" data-act="fix-done" data-i="' + i + '">Done</button></div></details>' +
-          '</article>').join('') +
-        (ready.length ? '<div class="form-actions"><button class="btn primary" data-act="save-imp">Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' : '') +
-        '<p class="muted small" style="margin-top:12px">Diagrams and graphs are cut out of the PDF automatically. If one is missing or badly cut, save the question anyway, then open it from the bank and paste a screenshot of the diagram.</p>';
-      $$('#impPreview input[data-inc]').forEach((c) => c.addEventListener('change', () => { st.parsed[Number(c.dataset.inc)].include = c.checked; renderPreview(); }));
-      $$('#impPreview input[data-ans]').forEach((r) => r.addEventListener('change', () => { const it = st.parsed[Number(r.dataset.ans)]; it.answer = Number(r.value); it.warnings = it.warnings.filter((w) => w !== 'No answer found'); renderPreview(); }));
-      $$('#impPreview select[data-ich]').forEach((sel) => sel.addEventListener('change', () => { st.parsed[Number(sel.dataset.ich)].chapter_id = Number(sel.value) || ''; renderPreview(); }));
-      $$('#impPreview [data-fix]').forEach((el) => {
-        const [i, key] = el.dataset.fix.split(':');
-        const it = st.parsed[Number(i)];
-        el.addEventListener('input', () => {
-          it.edited = true;
-          if (key === 'body') it.body = el.value; else if (key === 'solution') it.solution = el.value; else it.options[Number(key)] = el.value;
-        });
-      });
-      $$('#impPreview summary[data-fixopen]').forEach((sm) => sm.addEventListener('click', () => { const it = st.parsed[Number(sm.dataset.fixopen)]; it.editing = !sm.parentNode.open; }));
-      $$('#impPreview select[data-fig]').forEach((sel) => sel.addEventListener('change', () => {
-        const [i, k] = sel.dataset.fig.split(':').map(Number);
-        const it = st.parsed[i];
-        const v = /^\d$/.test(sel.value) ? Number(sel.value) : sel.value;
-        if (typeof v === 'number') it.figures.forEach((f, j) => { if (j !== k && f.assign === v) f.assign = 'q'; });
-        it.figures[k].assign = v;
-        const y = window.scrollY; renderPreview(); window.scrollTo(0, y);
-      }));
-      hydrateImages(box);
-    }
-
-    S.actions['fix-done'] = (btn) => {
-      const it = st.parsed[Number(btn.dataset.i)];
-      it.editing = false;
-      if (it.edited && it.body.trim() && it.options.every((o, k) => o.trim() || optImage(it, k))) it.include = true;
-      const y = window.scrollY; renderPreview(); window.scrollTo(0, y);
-    };
-    S.actions['apply-range'] = () => {
-      const from = Number($('#rFrom').value), to = Number($('#rTo').value) || from, ch = Number($('#rChapter').value);
-      if (!from || !ch) { toast('Enter the question numbers and choose a chapter.', 'bad'); return; }
-      let n = 0;
-      st.parsed.forEach((it) => { if (it.num >= Math.min(from, to) && it.num <= Math.max(from, to)) { it.chapter_id = ch; n++; } });
-      toast(n + ' question' + (n === 1 ? '' : 's') + ' set to ' + chapterName(ch));
-      renderPreview();
-    };
+    const review = importReview(st, {
+      onSaved: () => { dropFigures(); if (st.pdf && st.pdf.doc) st.pdf.doc.destroy(); st.text = ''; st.parsed = null; st.fileInfo = null; st.pdf = null; },
+    });
     S.actions.parse = async () => {
       const n = parseNow();
       if (!n) { toast('No questions found. Check that each starts with a number.', 'bad'); return; }
@@ -1501,41 +1580,512 @@
         if (st.text === st.pdf.text) { try { await attachFigures(); } catch (e) { console.error(e); } status(st.fileInfo || ''); }
         else toast('You changed the text, so diagrams from the PDF were left out. Add them by editing the questions after saving.');
       }
-      renderPreview();
+      review.render();
       $('#impPreview').scrollIntoView({ behavior: 'smooth' });
     };
-    S.actions['save-imp'] = async (b) => {
-      const ready = st.parsed.filter(isReady);
-      if (!ready.length) return;
-      busy(b, true, 'Saving…');
-      try {
-        const used = ready.flatMap((it) => (it.figures || []).filter((f) => f.assign !== 'none' && !f.path));
-        for (let k = 0; k < used.length; k++) {
-          b.textContent = 'Uploading diagrams ' + (k + 1) + ' of ' + used.length + '…';
-          used[k].path = await uploadFile(new File([used[k].blob], 'diagram.png', { type: 'image/png' }));
+    S.actions['to-ai'] = () => { S.aiPending = st.lastFile ? [st.lastFile] : null; location.hash = '#/import/ai'; };
+    review.render();
+  }
+
+  /* ================= Convert scanned papers with AI ================= */
+  // Each page (or each half of a two-page spread) is sent to the ai-convert server function, which asks Google Gemini to
+  // type up the questions and mark where the diagrams are. Diagrams are cut out here from the full-size page.
+
+  const AI_SUBJECTS = ['Physics', 'Chemistry', 'Botany', 'Zoology'];
+  const AI_KEEP = 2400; // longest side kept for cutting out diagrams
+  const AI_SEND = 2000; // longest side sent to the AI
+  const AI_WORKERS = 2;
+
+  const canvasBlob = (c, type, q) => new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Could not make a picture of the page. The phone may be short of memory; try fewer pages at a time.'))), type, q));
+  const blobBase64 = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).replace(/^data:[^,]*,/, '')); r.onerror = () => rej(new Error('Could not read the page picture.')); r.readAsDataURL(blob); });
+  const isPdfFile = (f) => /\.pdf$/i.test(f.name || '') || /pdf/i.test(f.type || '');
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function newAiState() {
+    return { pages: [], units: [], files: [], keyPages: [], keyFiles: [], keyText: '', split: false, from: 1, to: 1, subject: '', diffMode: 'ai', clean: true,
+      chapter_id: '', difficulty: 'medium', qtype: 'single', source_type: 'pyq', source_note: '', parsed: null, running: false, halt: null, status: null, bitmaps: new Map() };
+  }
+
+  // One page as a JPEG kept in memory, plus a small preview.
+  async function aiPageFrom(c, fileName, n, isKey) {
+    const blob = await canvasBlob(c, 'image/jpeg', 0.9);
+    const t = document.createElement('canvas');
+    const ts = 150 / Math.max(c.width, c.height);
+    t.width = Math.max(1, Math.round(c.width * ts)); t.height = Math.max(1, Math.round(c.height * ts));
+    t.getContext('2d').drawImage(c, 0, 0, t.width, t.height);
+    const thumb = URL.createObjectURL(await canvasBlob(t, 'image/jpeg', 0.7));
+    return { fileName, n, w: c.width, h: c.height, blob, thumb, isKey: !!isKey };
+  }
+
+  async function aiReadFiles(files, isKey, onProgress) {
+    const out = [];
+    for (const file of files) {
+      if (isPdfFile(file)) {
+        const lib = await loadPdfJs();
+        let doc;
+        try { doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise; }
+        catch (e) { throw new Error(/password/i.test(String(e && e.message)) ? file.name + ' is password-protected. Remove the password and try again.' : file.name + ' does not look like a working PDF.'); }
+        for (let n = 1; n <= doc.numPages; n++) {
+          onProgress('Opening ' + file.name + ': page ' + n + ' of ' + doc.numPages + '…');
+          const page = await doc.getPage(n);
+          const v1 = page.getViewport({ scale: 1 });
+          const vp = page.getViewport({ scale: Math.min(4, AI_KEEP / Math.max(v1.width, v1.height)) });
+          const c = document.createElement('canvas');
+          c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+          const ctx = c.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+          await page.render({ canvasContext: ctx, viewport: vp }).promise;
+          page.cleanup();
+          out.push(await aiPageFrom(c, file.name, n, isKey));
+          c.width = c.height = 0;
         }
-        b.textContent = 'Saving…';
-        const n = await Api.insertQuestions(ready.map((it) => {
-          const figs = (it.figures || []).filter((f) => f.assign !== 'none');
-          return {
-            chapter_id: it.chapter_id, qtype: st.qtype, difficulty: st.difficulty, body: it.body,
-            options: it.options.map((t, k) => { const f = figs.find((x) => x.assign === k + 1); return { text: t.trim(), image: f ? f.path : null }; }),
-            answer: it.answer, solution: it.solution || null,
-            images: figs.filter((f) => f.assign === 'q').map((f) => f.path), source_type: st.source_type, source_note: st.source_note.trim() || null,
-          };
-        }));
-        invalidateMeta();
-        const chapters = [...new Set(ready.map((it) => it.chapter_id))];
-        toast(n + ' question' + (n === 1 ? '' : 's') + ' added to the bank');
-        S.bank = Object.assign(S.bank, { subject: '', chapter: chapters.length === 1 ? String(chapters[0]) : '', page: 0, search: '', mine: true, samples: false, archived: false });
-        if (chapters.length === 1) S.bank.subject = String((S.chapterById.get(chapters[0]) || {}).subject_id || '');
-        dropFigures();
-        if (st.pdf && st.pdf.doc) st.pdf.doc.destroy();
-        st.text = ''; st.parsed = null; st.fileInfo = null; st.pdf = null;
-        location.hash = '#/bank';
-      } catch (e) { fail(e); busy(b, false); }
+        doc.destroy();
+      } else {
+        onProgress('Opening ' + file.name + '…');
+        let bmp;
+        try { bmp = await createImageBitmap(file); }
+        catch (e) { throw new Error(file.name + ' can’t be opened in this browser. Use JPG or PNG photos, or a PDF.'); }
+        const s = Math.min(1, AI_KEEP / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+        ctx.drawImage(bmp, 0, 0, c.width, c.height);
+        if (bmp.close) bmp.close();
+        out.push(await aiPageFrom(c, file.name, out.filter((p) => p.fileName === file.name).length + 1, isKey));
+        c.width = c.height = 0;
+      }
+    }
+    return out;
+  }
+
+  // Decoded page pictures, a few at a time.
+  async function aiBitmap(st, page) {
+    if (!st.bitmaps.has(page)) {
+      if (st.bitmaps.size >= 4) { const [k, p] = st.bitmaps.entries().next().value; st.bitmaps.delete(k); p.then((b) => b.close && b.close()).catch(() => {}); }
+      st.bitmaps.set(page, createImageBitmap(page.blob));
+    }
+    return st.bitmaps.get(page);
+  }
+
+  function aiUnits(st) {
+    const units = [];
+    const add = (page, half, label) => units.push({ id: units.length, page, half, label, status: 'queued', result: null, error: '' });
+    st.pages.forEach((p, i) => {
+      if (i + 1 < st.from || i + 1 > st.to) return;
+      const spread = st.split && p.w > p.h * 1.15;
+      const name = 'Page ' + (i + 1);
+      if (spread) { add(p, 'L', name + ' left'); add(p, 'R', name + ' right'); } else add(p, null, name);
+    });
+    st.keyPages.forEach((p, i) => add(p, null, 'Answer key ' + (i + 1)));
+    return units;
+  }
+
+  // Area of the page a unit covers, in page pixels.
+  function unitRect(u) {
+    const half = u.half ? Math.floor(u.page.w / 2) : u.page.w;
+    return { x: u.half === 'R' ? u.page.w - half : 0, y: 0, w: half, h: u.page.h };
+  }
+
+  async function aiUnitJpeg(st, u) {
+    const bmp = await aiBitmap(st, u.page);
+    const r = unitRect(u);
+    const s = Math.min(1, AI_SEND / Math.max(r.w, r.h));
+    const c = document.createElement('canvas');
+    c.width = Math.round(r.w * s); c.height = Math.round(r.h * s);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+    const b = await canvasBlob(c, 'image/jpeg', 0.86);
+    c.width = c.height = 0;
+    return blobBase64(b);
+  }
+
+  // Cuts a box (0-1000 of the unit) out of the page. pad widens it. Diagrams are tidied (see Logic.tidyFigure);
+  // pictures for comparing with the scan are left as they are.
+  async function aiCrop(st, u, box, pad, clean, raw) {
+    const bmp = await aiBitmap(st, u.page);
+    const r = unitRect(u);
+    const m = 8 + (pad || 0) * 15;
+    const y0 = Math.max(0, Math.floor(r.y + (box[0] - m) / 1000 * r.h)), x0 = Math.max(r.x, Math.floor(r.x + (box[1] - m) / 1000 * r.w));
+    const y1 = Math.min(r.y + r.h, Math.ceil(r.y + (box[2] + m) / 1000 * r.h)), x1 = Math.min(r.x + r.w, Math.ceil(r.x + (box[3] + m) / 1000 * r.w));
+    const w = Math.max(4, x1 - x0), h = Math.max(4, y1 - y0);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bmp, x0, y0, w, h, 0, 0, w, h);
+    let keep = { x: 0, y: 0, w, h };
+    if (!raw) {
+      const img = ctx.getImageData(0, 0, w, h);
+      keep = L.tidyFigure(img.data, w, h, { clean });
+      if (clean) ctx.putImageData(img, 0, 0);
+    }
+    const scale = Math.min(1, 1200 / keep.w);
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(keep.w * scale)); out.height = Math.max(1, Math.round(keep.h * scale));
+    const octx = out.getContext('2d');
+    octx.imageSmoothingQuality = 'high';
+    octx.drawImage(c, keep.x, keep.y, keep.w, keep.h, 0, 0, out.width, out.height);
+    c.width = c.height = 0;
+    const blob = await canvasBlob(out, raw ? 'image/jpeg' : 'image/png', 0.85);
+    return { blob, url: URL.createObjectURL(blob), w: out.width, h: out.height };
+  }
+
+  function aiNoteBase(st) {
+    const typed = String(st.source_note || '').trim();
+    if (typed) return typed;
+    const f = st.pages[0] && st.pages[0].fileName;
+    return f ? f.replace(/\.[a-z0-9]+$/i, '') : 'Scanned paper';
+  }
+
+  // Turns the AI's pages into questions to check. Questions the mentor already changed keep their changes.
+  async function aiBuildReview(st) {
+    const done = st.units.filter((u) => u.status === 'done');
+    const pages = done.filter((u) => !u.page.isKey).map((u) => ({ unit: u.id, label: u.label, questions: u.result.questions || [], answer_key: u.result.answer_key || [] }))
+      .concat(done.filter((u) => u.page.isKey).map((u) => ({ unit: u.id, label: u.label, questions: [], answer_key: u.result.answer_key || [] })));
+    // Questions read off key pages by mistake are dropped: key files only give answers.
+    const merged = L.mergeAiPages(pages, { subject: st.subject || null });
+    const key = Object.assign({}, merged.key, L.parseAnswerKey(st.keyText));
+    const unitById = new Map(st.units.map((u) => [u.id, u]));
+    const old = new Map((st.parsed || []).filter((it) => it.touched).map((it) => [it.num, it]));
+    const fresh = [];
+    for (const m of merged.items) {
+      if (old.has(m.num)) { fresh.push(old.get(m.num)); old.delete(m.num); continue; }
+      const warnings = [];
+      const opts = m.options.slice(0, 4);
+      if (m.options.length !== 4) warnings.push('Found ' + m.options.length + ' options instead of 4');
+      while (opts.length < 4) opts.push({ text: '', box: null });
+      if (m.orphan) warnings.push('Its start is on an earlier page');
+      const fromKey = key[m.num] || null;
+      if (fromKey && m.printed_answer && fromKey !== m.printed_answer) warnings.push('Key and page disagree');
+      const figures = [];
+      for (const f of m.figs) figures.push({ unit: f.unit, box: f.box, assign: 'q' });
+      opts.forEach((o, k) => { if (o.box) figures.push({ unit: o.unit, box: o.box, assign: k + 1 }); });
+      for (const f of figures) Object.assign(f, await aiCrop(st, unitById.get(f.unit), f.box, 0, st.clean), { pad: 0 });
+      fresh.push({
+        num: m.num, body: m.body, options: opts.map((o) => o.text), answer: fromKey || m.printed_answer || null, solution: '', warnings,
+        include: !!m.body && m.options.length === 4 && !m.orphan, chapter_id: m.chapter_id || st.chapter_id || '', subject: m.subject,
+        difficulty: st.diffMode === 'ai' ? m.difficulty : st.difficulty, qtype: m.qtype, pages: m.pages, figures,
+        scan: m.qboxes.length ? m.qboxes : null,
+      });
+    }
+    // Pictures of questions that are no longer in the list are let go.
+    const keep = new Set(fresh);
+    (st.parsed || []).filter((it) => !keep.has(it)).forEach((it) => dropItemFigures([it]));
+    // Questions with this source already in the bank are shown but not saved again.
+    const base = aiNoteBase(st);
+    try {
+      const taken = await Api.sourceNotesTaken(fresh.map((it) => base + ' · Q' + it.num));
+      fresh.forEach((it) => { if (taken.has(base + ' · Q' + it.num)) { it.dup = true; it.include = false; } });
+    } catch (e) { console.error(e); }
+    st.parsed = fresh;
+  }
+
+  function aiResetText(ms) {
+    const at = new Date(Date.now() + ms);
+    const day = (d) => d.toLocaleDateString('en-IN');
+    return at.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }) + (day(at) !== day(new Date()) ? ' tomorrow' : ' today');
+  }
+
+  async function viewImportAi(token) {
+    setTitle('Convert a scanned paper with AI');
+    const st = S.ai || (S.ai = newAiState());
+    main().innerHTML =
+      '<div class="page-head"><div><h1>Convert a scanned paper with AI</h1><p class="sub">For scans and phone photos of printed papers. The AI types up each question, cuts out its diagrams and suggests the chapter. You check every question before it goes into the bank.</p></div>' +
+      '<a class="btn" href="#/import">Back to PDF import</a></div>' +
+      '<div id="aiState"></div>' +
+      '<details class="panel ai-setup" id="aiSetup"' + (st.units.length ? '' : ' open') + '><summary class="ai-sum"><span id="aiSum"></span><span class="ai-sum-act"></span></summary>' +
+      '<h2>1. The question paper</h2>' +
+      '<div class="row" style="align-items:center;gap:14px;margin-top:10px"><label class="btn primary"><input type="file" id="aiPaper" accept="application/pdf,.pdf,image/*" multiple hidden>Choose PDF or photos</label>' +
+      '<span class="muted small" id="aiPaperInfo"></span></div>' +
+      '<div id="aiThumbs"></div>' +
+      '<div id="aiRange"></div>' +
+      '<h2 style="margin-top:22px">2. Answer key <span class="muted small" style="font-weight:500">(optional)</span></h2>' +
+      '<p class="muted small" style="margin:4px 0 10px">If the key is printed at the end of the paper, just include those pages above. Otherwise add it here as a PDF or photo, or type it.</p>' +
+      '<div class="row" style="align-items:center;gap:14px"><label class="btn"><input type="file" id="aiKey" accept="application/pdf,.pdf,image/*" multiple hidden>Add key PDF or photo</label><span class="muted small" id="aiKeyInfo"></span></div>' +
+      '<label class="field" style="margin-top:12px">Or type the key<textarea id="aiKeyText" rows="2" placeholder="1-3, 2-1, 3-4, 4-2 …   or   1 (c) 2 (a) …">' + esc(st.keyText) + '</textarea></label>' +
+      '<h2 style="margin-top:22px">3. About this paper</h2><div class="form-grid" style="margin-top:10px">' +
+      '<label class="field">Subject<select id="aiSubject"><option value="">Several subjects (follow the headings)</option>' + AI_SUBJECTS.map((x) => '<option' + (st.subject === x ? ' selected' : '') + '>' + x + '</option>').join('') + '</select></label>' +
+      '<label class="field">Difficulty<select id="aiDiff"><option value="ai"' + (st.diffMode === 'ai' ? ' selected' : '') + '>AI suggests for each question</option>' + Object.keys(DIFFS).map((k) => '<option value="' + k + '"' + (st.diffMode === k ? ' selected' : '') + '>All ' + DIFFS[k].toLowerCase() + '</option>').join('') + '</select></label>' +
+      '<label class="field">Source<select id="aiSource">' + mapOptions(SOURCES, st.source_type) + '</select></label>' +
+      '<label class="field">Source details<span class="hint">Saved with each question number, so the same paper is never added twice</span><input id="aiNote" type="text" maxlength="120" value="' + esc(st.source_note) + '" placeholder="e.g. NEET 2025 · Code 45"></label>' +
+      '</div>' +
+      '<label class="check" style="margin-top:12px"><input type="checkbox" id="aiClean"' + (st.clean ? ' checked' : '') + '> Clean up diagrams: remove watermarks and pen marks in colour</label>' +
+      '<div class="form-actions" id="aiGo"></div>' +
+      '<p class="muted small ai-privacy">Pages are sent to Google Gemini on its free plan. Google may use them to improve its products, and people at Google may read them. That is fine for printed question papers; don’t upload answer sheets or anything with students’ names.</p>' +
+      '</details>' +
+      '<section id="aiProgress" class="section"></section>' +
+      '<section id="impPreview" class="section"></section>';
+
+    const review = importReview(st, {
+      noteFor: (it) => aiNoteBase(st) + ' · Q' + it.num,
+      recrop: async (f, pad) => {
+        const u = st.units.find((x) => x.id === f.unit);
+        const c = await aiCrop(st, u, f.box, pad, st.clean);
+        if (f.url) URL.revokeObjectURL(f.url);
+        Object.assign(f, c, { pad, path: null });
+      },
+      compare: async (it, el) => {
+        try {
+          const parts = [];
+          for (const q of it.scan) {
+            const u = st.units.find((x) => x.id === q.unit);
+            const c = await aiCrop(st, u, q.box, 1, false, true);
+            parts.push('<img src="' + esc(c.url) + '" alt="Scan of Q' + it.num + '">');
+          }
+          el.className = 'scan-body';
+          el.innerHTML = parts.join('') || '<span class="muted small">No picture of this question.</span>';
+        } catch (e) { el.textContent = 'Could not show the scan: ' + e.message; }
+      },
+      intro: () => '<p class="muted small" style="margin:-4px 0 14px">Check each question against the paper: open “Compare with the scan” to see the original. Questions already in the bank from this paper are shown but not saved again.</p>',
+      footnote: 'If a diagram is cut badly, use Wider or Tighter under it. If one is missing, save the question anyway, then open it from the bank and paste a screenshot of the diagram.',
+      onSaved: (saved, left) => {
+        dropItemFigures(saved);
+        st.parsed = left;
+        const waiting = left.filter((it) => it.include && !it.dup).length;
+        if (waiting) { toast(saved.length + ' saved. ' + waiting + ' still need a chapter, an answer or a fix.'); return 'stay'; }
+        return null;
+      },
+    });
+
+    const setState = (html) => { const el = $('#aiState'); if (el) el.innerHTML = html; };
+    async function loadStatus() {
+      try { st.status = await Api.ai('status'); }
+      catch (e) { st.status = { error: e.message }; }
+      if (stale(token)) return;
+      const s = st.status;
+      if (s.error) setState('<div class="notice warn" style="margin-bottom:16px">Could not check whether AI conversion is ready: ' + esc(s.error) + '</div>');
+      else if (!s.configured) setState('<div class="notice warn" style="margin-bottom:16px">' + (isAdmin() ? 'AI conversion needs a free Gemini key first. <a href="#/admin" data-act="ai-admin">Set it up in Admin → AI conversion</a>.' : 'AI conversion is not set up yet. Ask the admin to add a Gemini key.') + '</div>');
+      else if (!s.allowed) setState('<div class="notice warn" style="margin-bottom:16px">The admin has not switched AI conversion on for mentors.</div>');
+      else setState(s.daily_pages ? '<p class="muted small" style="margin:-6px 0 14px">You have converted ' + s.used_today + ' of ' + s.daily_pages + ' pages allowed today.</p>' : '');
+      renderGo();
+    }
+    S.actions['ai-admin'] = () => { S.adminTab = 'ai'; location.hash = '#/admin'; };
+
+    function renderSum() {
+      const el = $('#aiSum');
+      if (!el) return;
+      const bits = [];
+      if (st.pages.length) bits.push(st.files.join(', ') + ' (' + (st.from === 1 && st.to === st.pages.length ? st.pages.length + ' page' + (st.pages.length === 1 ? '' : 's') : 'pages ' + st.from + '–' + st.to) + ')');
+      if (st.keyPages.length || st.keyText.trim()) bits.push('answer key added');
+      if (st.source_note.trim()) bits.push(st.source_note.trim());
+      el.textContent = bits.length ? bits.join(' · ') : 'Choose the paper to convert';
+      $('#aiSetup > summary').hidden = !st.units.length;
+      $('#aiSetup .ai-sum-act').textContent = $('#aiSetup').open ? 'Hide' : 'Change';
+    }
+    function renderSetup() {
+      renderSum();
+      const n = st.pages.length;
+      $('#aiPaperInfo').textContent = n ? st.files.join(', ') + ': ' + n + ' page' + (n === 1 ? '' : 's') : 'A PDF of the scan, or photos of each page taken flat in good light.';
+      $('#aiKeyInfo').textContent = st.keyPages.length ? st.keyFiles.join(', ') + ': ' + st.keyPages.length + ' page' + (st.keyPages.length === 1 ? '' : 's') + ' ' : '';
+      if (st.keyPages.length && !$('#aiKeyInfo').querySelector('button')) $('#aiKeyInfo').insertAdjacentHTML('beforeend', '<button class="btn ghost sm" data-act="ai-key-clear">Remove</button>');
+      const statusOf = (p) => {
+        const us = st.units.filter((u) => u.page === p);
+        if (!us.length) return '';
+        if (us.some((u) => u.status === 'failed')) return 'failed';
+        if (us.every((u) => u.status === 'done')) return 'done';
+        if (us.some((u) => u.status === 'working' || u.status === 'waiting')) return 'working';
+        return '';
+      };
+      $('#aiThumbs').innerHTML = n ? '<div class="ai-thumbs">' + st.pages.map((p, i) => '<figure class="' + (i + 1 < st.from || i + 1 > st.to ? 'off ' : '') + statusOf(p) + '"><img src="' + esc(p.thumb) + '" alt="Page ' + (i + 1) + '"><figcaption>' + (i + 1) + '</figcaption></figure>').join('') + '</div>' : '';
+      const landscape = st.pages.filter((p) => p.w > p.h * 1.15).length;
+      $('#aiRange').innerHTML = n ? '<div class="row" style="gap:10px;margin-top:12px;align-items:center"><span class="small">Convert pages</span><input type="number" id="aiFrom" min="1" max="' + n + '" value="' + st.from + '" style="width:72px" aria-label="First page"><span class="small">to</span><input type="number" id="aiTo" min="1" max="' + n + '" value="' + st.to + '" style="width:72px" aria-label="Last page">' +
+        (landscape ? '<label class="check"><input type="checkbox" id="aiSplit"' + (st.split ? ' checked' : '') + '> Each scan shows two booklet pages side by side</label>' : '') + '</div>' : '';
+      if (n) {
+        const clampN = (v) => Math.max(1, Math.min(n, Number(v) || 1));
+        $('#aiFrom').addEventListener('change', (e) => { st.from = clampN(e.target.value); if (st.to < st.from) st.to = st.from; renderSetup(); });
+        $('#aiTo').addEventListener('change', (e) => { st.to = clampN(e.target.value); if (st.from > st.to) st.from = st.to; renderSetup(); });
+        if ($('#aiSplit')) $('#aiSplit').addEventListener('change', (e) => { st.split = e.target.checked; renderGo(); });
+      }
+      renderGo();
+    }
+
+    function renderGo() {
+      const el = $('#aiGo');
+      if (!el) return;
+      const s = st.status || {};
+      const ready = s.allowed && st.pages.length;
+      const pagesSel = st.pages.length ? st.to - st.from + 1 : 0;
+      const halves = st.pages.length ? aiUnits(st).length - st.keyPages.length : 0;
+      const k = st.keyPages.length;
+      const label = 'Convert ' + pagesSel + ' page' + (pagesSel === 1 ? '' : 's') + (halves > pagesSel ? ' (' + halves + ' halves)' : '') +
+        (k ? ' and ' + k + ' key page' + (k === 1 ? '' : 's') : '');
+      const hasDone = st.units.some((u) => u.status === 'done');
+      if (st.running) { el.innerHTML = '<span class="muted small">Converting… see the progress below.</span>'; return; }
+      if (!hasDone) { el.innerHTML = '<button class="btn primary" data-act="ai-start"' + (ready ? '' : ' disabled') + '>' + label + '</button>'; return; }
+      el.innerHTML = '<button class="btn" data-act="ai-start"' + (ready ? '' : ' disabled') + '>Start again: ' + label.toLowerCase() + '</button>';
+    }
+
+    function unitLine(u) {
+      const r = u.result;
+      const what = u.status === 'done' ? (r.page_kind === 'answer_key' ? 'answer key: ' + r.answer_key.length + ' answers' : r.page_kind === 'other' ? 'no questions on this page' :
+        r.questions.length + ' question' + (r.questions.length === 1 ? '' : 's') + (r.questions.reduce((a, q) => a + q.figures.length + q.options.filter((o) => o.box).length, 0) ? ', ' + r.questions.reduce((a, q) => a + q.figures.length + q.options.filter((o) => o.box).length, 0) + ' diagrams' : '')) :
+        u.status === 'working' ? 'reading…' : u.status === 'waiting' ? 'waiting for Google’s per-minute limit…' : u.status === 'failed' ? esc(u.error) : 'waiting';
+      return '<li class="u-' + u.status + '"><span class="dot" aria-hidden="true"></span><b>' + esc(u.label) + '</b><span class="muted"> · ' + what + '</span>' +
+        (u.status === 'failed' && !st.running ? ' <button class="btn ghost sm" data-act="ai-retry" data-u="' + u.id + '">Try again</button>' : '') + '</li>';
+    }
+
+    function renderProgress() {
+      const box = $('#aiProgress');
+      if (!box || stale(token)) return;
+      if (!st.units.length) { box.innerHTML = ''; return; }
+      const total = st.units.length, done = st.units.filter((u) => u.status === 'done').length, failed = st.units.filter((u) => u.status === 'failed').length;
+      const pct = Math.round(((done + failed) / total) * 100);
+      let haltHTML = '';
+      if (st.halt) {
+        const firstLeft = st.units.find((u) => u.status !== 'done' && !u.page.isKey);
+        const resume = 'Then press “Convert the parts not done yet” if this tab is still open, or choose the same file again and convert from page ' + (firstLeft ? st.pages.indexOf(firstLeft.page) + 1 : st.from) + '. Questions already saved are skipped.';
+        haltHTML = '<div class="notice warn" style="margin-top:12px">' + (st.halt.code === 'day'
+          ? '<b>Google’s free AI allowance for today is used up.</b> ' + done + ' of ' + total + ' are done: check and save their questions below. The allowance comes back at about ' + esc(aiResetText(L.msToPacificMidnight())) + '. ' + resume
+          : st.halt.code === 'my_limit' ? '<b>' + esc(st.halt.message) + '</b> Check and save the questions done so far below.'
+          : st.halt.code === 'key' ? '<b>Google did not accept the Gemini key.</b> ' + (isAdmin() ? 'Add a new key in Admin → AI conversion.' : 'Ask the admin to check the AI key.')
+          : '<b>Stopped.</b> ' + esc(st.halt.message || '')) + '</div>';
+      }
+      box.innerHTML = '<div class="panel"><div class="row" style="align-items:center"><h2 style="margin:0">' + (st.running ? 'Converting… ' + done + ' of ' + total + ' done' : 'Converted ' + done + ' of ' + total) + '</h2><span class="spacer"></span>' +
+        (st.running ? '<span class="muted small">Keep this page open. About ' + Math.max(1, Math.round((total - done - failed) * 25 / AI_WORKERS / 60)) + ' min left</span>' : '') + '</div>' +
+        '<div class="ai-bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"><span style="width:' + pct + '%"></span></div>' +
+        haltHTML +
+        (st.running ? '<div class="form-actions" style="margin-top:12px"><button class="btn" data-act="ai-stop">Stop</button></div>'
+          : total - done ? '<div class="form-actions" style="margin-top:12px"><button class="btn primary" data-act="ai-resume"' + ((st.status || {}).allowed ? '' : ' disabled') + '>Convert the ' + (total - done) + ' part' + (total - done === 1 ? '' : 's') + ' not done yet</button></div>' : '') +
+        '<details' + (st.running || failed ? ' open' : '') + ' style="margin-top:10px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">Page by page</summary><ol class="ai-units">' + st.units.map(unitLine).join('') + '</ol></details></div>';
+      renderSetupThumbsOnly();
+    }
+    function renderSetupThumbsOnly() {
+      if (!$('#aiThumbs') || !st.pages.length) return;
+      const figs = $$('#aiThumbs figure');
+      st.pages.forEach((p, i) => {
+        const us = st.units.filter((u) => u.page === p);
+        const f = figs[i];
+        if (!f) return;
+        f.classList.toggle('done', us.length > 0 && us.every((u) => u.status === 'done'));
+        f.classList.toggle('failed', us.some((u) => u.status === 'failed'));
+        f.classList.toggle('working', us.some((u) => u.status === 'working' || u.status === 'waiting'));
+      });
+    }
+
+    // The conversion keeps going if the mentor opens another page; it updates whichever copy of this page is on screen.
+    const ui = () => (st.ui && !stale(st.ui.token) ? st.ui : null);
+    const show = () => { const v = ui(); if (v) { v.progress(); v.go(); } };
+
+    async function convertUnit(u, subjectFor) {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (st.stopReq || st.halt) { u.status = 'queued'; return; }
+        u.status = 'working'; show();
+        try {
+          const image = await aiUnitJpeg(st, u);
+          const res = await Api.ai('page', { image, mime: 'image/jpeg', page_label: u.page.isKey ? u.label : u.label + ' of ' + st.pages.length + (st.pages.length === 1 ? ' page' : ' pages'), current_subject: subjectFor(u), subject_hint: st.subject || undefined });
+          u.status = 'done'; u.result = res; u.error = '';
+          if (st.status && res.used_today) st.status.used_today = res.used_today;
+          show();
+          return;
+        } catch (e) {
+          if (e.code === 'minute') { u.status = 'waiting'; show(); await sleepMs(Math.min(90, e.retryAfter || 30) * 1000); continue; }
+          if (['day', 'my_limit', 'key', 'not_configured', 'not_allowed', 'auth'].includes(e.code)) { st.halt = { code: e.code, message: e.message }; u.status = 'queued'; show(); return; }
+          if ((e.code === 'network' && attempt < 3) || ((e.code === 'failed' || e.code === 'slow') && attempt < 1)) { await sleepMs(3000); continue; }
+          u.status = 'failed'; u.error = e.message || 'The AI could not read this page.'; show(); return;
+        }
+      }
+      u.status = 'failed'; u.error = 'Google kept asking to wait. Try this page again in a few minutes.';
+    }
+
+    async function run(list) {
+      st.running = true; st.stopReq = false; st.halt = null;
+      show();
+      let lock = null;
+      try { if (navigator.wakeLock) lock = await navigator.wakeLock.request('screen'); } catch (e) { lock = null; }
+      // The subject of the last question on the nearest earlier page that is done helps pages without a heading.
+      const subjectFor = (u) => {
+        for (let i = u.id - 1; i >= 0; i--) {
+          const p = st.units[i];
+          const qs = p && p.status === 'done' && p.result.questions;
+          if (qs && qs.length) for (let k = qs.length - 1; k >= 0; k--) if (qs[k].subject) return qs[k].subject;
+        }
+        return st.subject || undefined;
+      };
+      const queue = list.slice();
+      const worker = async () => { while (queue.length && !st.stopReq && !st.halt) await convertUnit(queue.shift(), subjectFor); };
+      try { await Promise.all(Array.from({ length: Math.min(AI_WORKERS, queue.length) }, worker)); }
+      finally {
+        st.running = false;
+        if (lock) lock.release().catch(() => {});
+      }
+      if (st.stopReq && !st.halt) st.halt = { code: 'stopped', message: 'You stopped the conversion. Check what is done below, or convert the rest.' };
+      if (st.units.some((u) => u.status === 'done')) {
+        try { await aiBuildReview(st); } catch (e) { fail(e); }
+      }
+      const v = ui();
+      if (v) {
+        v.progress(); v.go(); v.review();
+        if (st.parsed && st.parsed.length) $('#impPreview').scrollIntoView({ behavior: 'smooth' });
+        else if (!st.halt) toast('No questions were found on these pages.', 'bad');
+        if (st.status && st.status.daily_pages) v.status();
+      }
+    }
+
+    S.actions['ai-start'] = async () => {
+      if (st.running) return;
+      if (st.parsed && st.parsed.some((it) => it.touched) && !confirm('Start again? Changes you made to the questions below will be lost.')) return;
+      dropItemFigures(st.parsed); st.parsed = null; review.render();
+      st.units = aiUnits(st);
+      $('#aiSetup').open = false; renderSum();
+      run(st.units);
+      setTimeout(() => { const el = $('#aiProgress'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
     };
-    renderPreview();
+    S.actions['ai-resume'] = () => { if (!st.running) run(st.units.filter((u) => u.status !== 'done').map((u) => Object.assign(u, { status: 'queued' }))); };
+    S.actions['ai-retry'] = (b) => { const u = st.units[Number(b.dataset.u)]; if (u && !st.running) { u.status = 'queued'; run([u]); } };
+    S.actions['ai-stop'] = () => { st.stopReq = true; toast('Stopping after the pages being read now…'); };
+    S.actions['ai-key-clear'] = () => { st.keyPages.forEach((p) => URL.revokeObjectURL(p.thumb)); st.keyPages = []; st.keyFiles = []; renderSetup(); };
+
+    async function addPaper(files) {
+      if (!files.length) return;
+      if (st.running) { toast('Wait for the current conversion to finish, or stop it first.', 'bad'); return; }
+      const info = $('#aiPaperInfo');
+      try {
+        const pages = await aiReadFiles(files, false, (m) => { if (info) info.textContent = m; });
+        st.pages.forEach((p) => URL.revokeObjectURL(p.thumb));
+        st.bitmaps.forEach((p) => p.then((b) => b.close && b.close()).catch(() => {}));
+        st.bitmaps = new Map();
+        dropItemFigures(st.parsed);
+        Object.assign(st, { pages, files: files.map((f) => f.name), units: [], parsed: null, halt: null, from: 1, to: pages.length });
+        st.split = pages.filter((p) => p.w > p.h * 1.15).length > pages.length / 2;
+        if (stale(token)) return;
+        renderSetup(); renderProgress(); review.render();
+      } catch (e) { if (info) info.textContent = 'Could not open that.'; fail(e); }
+    }
+    $('#aiPaper').addEventListener('change', (e) => { const files = Array.from(e.target.files || []); e.target.value = ''; addPaper(files); });
+    $('#aiKey').addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []); e.target.value = '';
+      if (!files.length) return;
+      try { const pages = await aiReadFiles(files, true, (m) => { $('#aiKeyInfo').textContent = m; }); st.keyPages = st.keyPages.concat(pages); st.keyFiles = st.keyFiles.concat(files.map((f) => f.name)); renderSetup(); }
+      catch (err) { $('#aiKeyInfo').textContent = ''; fail(err); }
+    });
+    $('#aiKeyText').addEventListener('input', debounce((e) => {
+      st.keyText = e.target.value;
+      if (!st.parsed) return;
+      const typed = L.parseAnswerKey(st.keyText);
+      st.parsed.forEach((it) => { if (typed[it.num] && !it.touched) it.answer = typed[it.num]; });
+      review.render();
+    }, 500));
+    $('#aiSetup').addEventListener('toggle', renderSum);
+    $('#aiSubject').addEventListener('change', (e) => { st.subject = e.target.value; });
+    $('#aiDiff').addEventListener('change', (e) => { st.diffMode = e.target.value; if (e.target.value !== 'ai') st.difficulty = e.target.value; });
+    $('#aiSource').addEventListener('change', (e) => { st.source_type = e.target.value; });
+    $('#aiNote').addEventListener('input', (e) => { st.source_note = e.target.value; renderSum(); });
+    $('#aiClean').addEventListener('change', async (e) => {
+      st.clean = e.target.checked;
+      if (!st.parsed) return;
+      for (const it of st.parsed) for (const f of it.figures || []) if (f.box) await review_recrop(f);
+      review.render();
+    });
+    const review_recrop = async (f) => { const u = st.units.find((x) => x.id === f.unit); const c = await aiCrop(st, u, f.box, f.pad || 0, st.clean); URL.revokeObjectURL(f.url); Object.assign(f, c, { path: null }); };
+
+    st.ui = { token, progress: renderProgress, go: renderGo, review: review.render, status: loadStatus };
+    renderSetup();
+    renderProgress();
+    review.render();
+    loadStatus();
+    if (S.aiPending) { const f = S.aiPending; S.aiPending = null; addPaper(f); }
   }
 
   /* ================= Question files (typed up by Claude from scanned papers) ================= */
@@ -1590,7 +2140,7 @@
     setTitle('Add a question file');
     const st = S.impFile || (S.impFile = { name: '', title: '', items: null, taken: new Set(), shown: 20 });
     main().innerHTML =
-      '<div class="page-head"><div><h1>Add a question file</h1><p class="sub">Scanned papers can’t be read by the website, so Claude types them up and sends back a question file (.json) with the text, diagrams, chapters and answers. Upload it here, check it, and add it to the bank.</p></div>' +
+      '<div class="page-head"><div><h1>Add a question file</h1><p class="sub">A question file (.json) is what Claude sends back when it types up a paper for you, with the text, diagrams, chapters and answers. Upload it here, check it, and add it to the bank. For a scanned paper you can also use <a href="#/import/ai">Convert with AI</a>.</p></div>' +
       '<a class="btn" href="#/import">Back to PDF import</a></div>' +
       '<div class="panel"><div class="row" style="align-items:center;gap:14px"><label class="btn primary"><input type="file" id="qsFile" hidden>Upload question file</label>' +
       '<span class="muted small" id="qsStatus">' + (st.name ? esc(st.name) : 'Choose the .json file Claude sent you.') + '</span></div></div>' +
@@ -1697,12 +2247,13 @@
     if (!isAdmin()) { location.hash = '#/'; return; }
     setTitle('Admin');
     main().innerHTML =
-      '<div class="page-head"><div><h1>Admin</h1><p class="sub">Accounts for your mentors, how papers look, and the chapter list.</p></div></div>' +
-      '<div class="tabs" role="tablist" style="margin:0 0 18px">' + [['people', 'Mentors and admins'], ['settings', 'Paper settings'], ['chapters', 'Chapters']].map(([k, l]) => '<button class="tab" data-act="atab" data-k="' + k + '" aria-selected="' + (S.adminTab === k) + '">' + l + '</button>').join('') + '</div>' +
+      '<div class="page-head"><div><h1>Admin</h1><p class="sub">Accounts for your mentors, how papers look, the chapter list, and AI conversion of scanned papers.</p></div></div>' +
+      '<div class="tabs" role="tablist" style="margin:0 0 18px">' + [['people', 'Mentors and admins'], ['settings', 'Paper settings'], ['chapters', 'Chapters'], ['ai', 'AI conversion']].map(([k, l]) => '<button class="tab" data-act="atab" data-k="' + k + '" aria-selected="' + (S.adminTab === k) + '">' + l + '</button>').join('') + '</div>' +
       '<div id="adminBody">' + loadingHTML() + '</div>';
     S.actions.atab = (b) => { S.adminTab = b.dataset.k; viewAdmin(S.viewToken); };
     if (S.adminTab === 'people') return adminPeople(token);
     if (S.adminTab === 'settings') return adminSettings();
+    if (S.adminTab === 'ai') return adminAi(token);
     return adminChapters();
   }
 
@@ -1848,6 +2399,95 @@
       catch (e) { fail(e); } finally { busy(b, false); }
     };
     render();
+  }
+
+  const AI_DEFAULT_MODELS = ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+  const AI_RESULT = {
+    ok: ['easy', 'Works'], day: ['hard', 'Free allowance used up for today'], minute: ['medium', 'Busy this minute; works otherwise'],
+    model: ['hard', 'Not available with this key'], key: ['hard', 'Key not accepted'], busy: ['medium', 'Google is busy; try later'],
+    network: ['hard', 'Could not reach Google'], bad_request: ['hard', 'Did not accept the request'], blocked: ['hard', 'Refused'], other: ['hard', 'Did not work'], skipped: ['', 'Not checked'],
+  };
+
+  async function adminAi(token) {
+    const box = $('#adminBody');
+    let status = null;
+    let usage = [];
+    try {
+      [status, usage] = await Promise.all([Api.ai('status'), Api.ai('usage').then((r) => r.rows || []).catch(() => [])]);
+    } catch (e) { status = { error: e.message }; }
+    if (stale(token)) return;
+    const a = Object.assign({ mentors_enabled: true, daily_pages: 60 }, (S.settings && S.settings.ai) || {});
+    const models = (Array.isArray(a.models) && a.models.length ? a.models : (status && status.models) || AI_DEFAULT_MODELS);
+    const keyLine = status.error ? '<div class="notice warn">Could not check the AI set-up: ' + esc(status.error) + '</div>'
+      : status.configured ? '<div class="notice good"><b>Gemini key saved</b> (ends ' + esc(String(status.key_hint || '').replace('…', '')) + (status.key_saved_at ? ', added ' + esc(fmtDate(status.key_saved_at)) : '') + '). AI conversion is ready.</div>'
+      : '<div class="notice warn"><b>No Gemini key yet.</b> AI conversion stays off until you add one. It is free.</div>';
+    const byDay = usage.reduce((m, r) => { (m[r.day] = m[r.day] || []).push(r); return m; }, {});
+    box.innerHTML =
+      '<div class="stack">' +
+      '<div class="panel"><h2 style="margin-bottom:12px">Gemini key</h2>' + keyLine +
+      '<ol class="ai-steps small">' +
+      '<li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> and sign in with a Google account. A separate Google account just for AIN keeps things tidy.</li>' +
+      '<li>Press <b>Create API key</b>. If it asks for a project, let it create a new one.</li>' +
+      '<li>Copy the key (a long code) and paste it here. The website checks it with Google before saving. Only the server can read it after that; it is not shown again, not even to you.</li></ol>' +
+      '<form id="keyForm" class="row" style="gap:10px;margin-top:12px" novalidate><input type="password" id="aiKeyIn" autocomplete="off" spellcheck="false" placeholder="Paste the Gemini API key" style="max-width:360px" aria-label="Gemini API key"><button class="btn primary" type="submit" id="aiKeySave">' + (status.configured ? 'Replace key' : 'Save key') + '</button></form>' +
+      (status.configured ? '<div class="row" style="gap:10px;margin-top:14px"><button class="btn" data-act="ai-test">Check the AI models</button><button class="btn ghost" data-act="ai-rmkey">Remove key</button></div>' : '') +
+      '<div id="aiTestOut"></div></div>' +
+      '<form class="panel" id="aiSetForm" novalidate><h2 style="margin-bottom:12px">Who can use it</h2>' +
+      '<label class="check"><input type="checkbox" id="aiMentors"' + (a.mentors_enabled !== false ? ' checked' : '') + '> Mentors can convert scanned papers (admins always can)</label>' +
+      '<div class="form-grid" style="margin-top:12px"><label class="field">Pages per mentor per day<span class="hint">0 means no limit. Google’s free daily allowance is shared by everyone, so this stops one person using it all.</span><input type="number" id="aiDaily" min="0" max="1000" value="' + esc(a.daily_pages) + '"></label></div>' +
+      '<details style="margin-top:14px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">AI models to try, in order</summary>' +
+      '<p class="muted small" style="margin:8px 0">The first model that works and still has free allowance today is used, so later ones are back-ups. If Google renames its models, update this list.</p>' +
+      '<textarea id="aiModels" rows="5" spellcheck="false">' + esc(models.join('\n')) + '</textarea><div class="row" style="margin-top:8px"><button class="btn ghost sm" type="button" data-act="ai-models-reset">Back to the usual list</button></div></details>' +
+      '<div class="form-actions"><button class="btn primary" type="submit" id="aiSetSave">Save</button></div></form>' +
+      '<div class="panel"><h2 style="margin-bottom:12px">Use in the last two weeks</h2>' + (usage.length
+        ? '<div class="table-wrap"><table class="data"><thead><tr><th>Day</th><th>Who</th><th class="num">Pages</th><th class="num">Questions</th></tr></thead><tbody>' +
+          Object.keys(byDay).sort().reverse().map((d) => byDay[d].map((r, k) => '<tr><td>' + (k ? '' : esc(fmtDate(d))) + '</td><td>' + esc(personName(r.user_id)) + '</td><td class="num">' + r.pages + '</td><td class="num">' + r.questions + '</td></tr>').join('')).join('') + '</tbody></table></div>'
+        : '<p class="muted small">No pages converted yet.</p>') + '</div>' +
+      '<div class="panel"><h2 style="margin-bottom:8px">Privacy and cost</h2><p class="small">On Google’s free plan, Google may use the pages you send to improve its products, and people at Google may read them. That is usually fine for printed question papers, but don’t upload answer sheets or anything with students’ names.</p>' +
+      '<p class="small" style="margin-top:8px">To keep papers out of Google’s training, turn on billing for the key’s project in Google AI Studio. It then costs roughly ₹1–2 per page converted, and the daily limits become much larger. Nothing here needs to change.</p></div>' +
+      '</div>';
+
+    $('#keyForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const k = $('#aiKeyIn').value.trim();
+      if (!k) { toast('Paste the key first.', 'bad'); return; }
+      const btn = $('#aiKeySave');
+      busy(btn, true, 'Checking with Google…');
+      try {
+        const r = await Api.ai('set_key', { key: k });
+        toast('Key saved' + (r.models_found && r.models_found.length ? '. ' + r.models_found.length + ' of the AI models are available.' : '.'));
+        adminAi(S.viewToken);
+      } catch (err) { fail(err); busy(btn, false); }
+    });
+    S.actions['ai-test'] = async (b) => {
+      busy(b, true, 'Asking each model…');
+      try {
+        const r = await Api.ai('test');
+        $('#aiTestOut').innerHTML = '<div class="table-wrap" style="margin-top:14px"><table class="data"><thead><tr><th>Model</th><th>Result</th></tr></thead><tbody>' +
+          r.results.map((x) => { const [cls, label] = AI_RESULT[x.result] || AI_RESULT.other; return '<tr><td><code>' + esc(x.model) + '</code></td><td><span class="chip ' + cls + '">' + esc(label) + '</span>' + (x.result !== 'ok' && x.message ? '<div class="muted small" style="margin-top:4px">' + esc(x.message) + '</div>' : '') + '</td></tr>'; }).join('') +
+          '</tbody></table></div><p class="muted small" style="margin-top:8px">' + (r.ok ? 'At least one model works, so conversion is ready.' : 'No model worked just now. If the allowance is used up, try again after about ' + esc(aiResetText(L.msToPacificMidnight())) + '.') + '</p>';
+      } catch (err) { fail(err); } finally { busy(b, false); }
+    };
+    S.actions['ai-rmkey'] = async (b) => {
+      if (!confirm('Remove the Gemini key? AI conversion stops working until a new key is added.')) return;
+      busy(b, true);
+      try { await Api.ai('remove_key'); toast('Key removed'); adminAi(S.viewToken); } catch (err) { fail(err); busy(b, false); }
+    };
+    S.actions['ai-models-reset'] = () => { $('#aiModels').value = AI_DEFAULT_MODELS.join('\n'); };
+    $('#aiSetForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const list = $('#aiModels').value.split(/[\s,]+/).map((m) => m.trim()).filter((m) => /^[\w.\-]+$/.test(m)).slice(0, 8);
+      const data = Object.assign({}, S.settings, {
+        ai: {
+          mentors_enabled: $('#aiMentors').checked,
+          daily_pages: Math.max(0, Math.floor(Number($('#aiDaily').value) || 0)),
+          models: list.length && list.join() !== AI_DEFAULT_MODELS.join() ? list : null,
+        },
+      });
+      const btn = $('#aiSetSave');
+      busy(btn, true, 'Saving…');
+      try { await Api.saveSettings(data); S.settings = data; toast('Saved'); } catch (err) { fail(err); } finally { busy(btn, false); }
+    });
   }
 
   /* ================= Account ================= */

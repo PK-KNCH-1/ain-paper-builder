@@ -451,3 +451,37 @@ ol.opts li img { max-height: 120px; display: block; background: #fff; border-rad
 .fix > summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: .85rem; }
 .fix-body { display: grid; gap: 10px; margin-top: 10px; }
 .fix-opts { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+
+/* Convert a scanned paper with AI */
+.ai-setup h2 { font-size: 1.05rem; }
+.ai-thumbs { display: flex; gap: 8px; overflow-x: auto; padding: 12px 2px 6px; -webkit-overflow-scrolling: touch; }
+.ai-thumbs figure { flex: 0 0 auto; margin: 0; position: relative; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px; background: var(--surface-2); }
+.ai-thumbs img { display: block; height: 84px; width: auto; background: #fff; border-radius: 3px; }
+.ai-thumbs figcaption { position: absolute; left: 6px; bottom: 6px; font: 600 .7rem/1 var(--font-mono); background: var(--surface); color: var(--ink); border-radius: 4px; padding: 3px 5px; }
+.ai-thumbs figure.off { opacity: .35; }
+.ai-thumbs figure.done { border-color: var(--good); box-shadow: inset 0 -3px 0 var(--good); }
+.ai-thumbs figure.working { border-color: var(--accent); box-shadow: inset 0 -3px 0 var(--accent); }
+.ai-thumbs figure.failed { border-color: var(--bad); box-shadow: inset 0 -3px 0 var(--bad); }
+.ai-bar { height: 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; margin-top: 12px; }
+.ai-bar span { display: block; height: 100%; background: var(--accent); transition: width .4s ease; }
+.ai-units { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; font-size: .88rem; }
+.ai-units li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ai-units .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line-strong); flex: 0 0 auto; }
+.ai-units .u-done .dot { background: var(--good); }
+.ai-units .u-working .dot, .ai-units .u-waiting .dot { background: var(--accent); animation: ai-pulse 1.2s ease-in-out infinite; }
+.ai-units .u-failed .dot { background: var(--bad); }
+.ai-units .u-failed .muted { color: var(--bad); }
+@keyframes ai-pulse { 50% { opacity: .3; } }
+.ai-privacy { margin-top: 14px; max-width: 72ch; }
+.ai-steps { margin: 12px 0 0; padding-left: 20px; display: grid; gap: 6px; max-width: 70ch; }
+.fig-adj { display: flex; gap: 4px; }
+.fig-adj .btn { padding: 3px 8px; font-size: .75rem; }
+.scan-cmp .scan-body { margin-top: 8px; display: grid; gap: 8px; }
+.scan-cmp .scan-body img { max-width: 100%; height: auto; background: #fff; border: 1px solid var(--line); border-radius: var(--r-sm); }
+.qcard.is-dup { opacity: .6; }
+.ai-setup > summary.ai-sum { list-style: none; cursor: pointer; display: flex; gap: 12px; align-items: baseline; justify-content: space-between; font-weight: 600; font-size: .92rem; }
+.ai-setup > summary.ai-sum::-webkit-details-marker { display: none; }
+.ai-setup[open] > summary.ai-sum { margin-bottom: 6px; color: var(--muted); font-weight: 500; }
+.ai-sum-act { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.ai-setup[open] > summary.ai-sum #aiSum { display: none; }
+.ai-setup[open] > summary.ai-sum { justify-content: flex-end; }

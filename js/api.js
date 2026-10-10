@@ -85,6 +85,24 @@
       return data;
     },
 
+    /* ---- AI conversion of scanned pages ---- */
+    // Returns the function's reply. On failure throws an Error carrying .code (and .retryAfter) from the server.
+    async ai(action, body) {
+      let data, error;
+      try { ({ data, error } = await client().functions.invoke('ai-convert', { body: Object.assign({ action }, body || {}) })); }
+      catch (e) { throw friendly(e); }
+      if (error) {
+        let j = null;
+        try { const ctx = error.context; if (ctx && typeof ctx.json === 'function') j = await ctx.json(); } catch (e) { /* no details */ }
+        const err = j && j.error ? new Error(j.error) : friendly(error);
+        err.code = (j && j.code) || (/Failed to send|Failed to fetch|NetworkError|Load failed/i.test(error.message || '') ? 'network' : 'failed');
+        if (j && j.retry_after) err.retryAfter = Number(j.retry_after);
+        throw err;
+      }
+      if (data && data.error) { const err = new Error(data.error); err.code = data.code || 'failed'; throw err; }
+      return data;
+    },
+
     /* ---- Settings and syllabus ---- */
     async settings() {
       const r = unwrap(await client().from('app_settings').select('data').eq('id', 1).maybeSingle());

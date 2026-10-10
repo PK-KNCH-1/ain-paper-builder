@@ -733,6 +733,133 @@
     return Array.from({ length: count }, () => 'q');
   }
 
+  /* ---------------- AI conversion of scanned pages ---------------- */
+
+  // Reads an answer key typed or pasted by hand: "1-3, 2-4", "1. (b) 2. (c)", "Q1 a Q2 d", one per line or all on one line.
+  function parseAnswerKey(text) {
+    const map = {};
+    const re = /(?:^|[\s,;|])(?:Q\.?\s*)?(\d{1,3})(?:\s*[.):\-–=]\s*\(?|\s*\(|\s+)\s*([a-dA-D1-4])\s*\)?(?=$|[\s,;|.])/g;
+    let m;
+    const src = String(text || '').replace(/\r/g, '');
+    while ((m = re.exec(src))) {
+      const n = Number(m[1]);
+      if (n >= 1 && n <= 999) map[n] = LETTERS[m[2].toLowerCase()];
+    }
+    return map;
+  }
+
+  const LIST_START = /^\s*(?:\(?[A-Ea-e]\)|[A-E][.)]\s|\(?[ivx]{1,4}\)|\d{1,2}[.)]\s|\||statement|assertion|reason|choose|select|codes)/i;
+
+  // Joins the pages the AI read into whole questions. Questions cut at the bottom of a page or column are joined
+  // with their continuation on the next page. pages: [{ unit, label, questions: [server question], answer_key }] in reading order.
+  function mergeAiPages(pages, opts) {
+    const o = opts || {};
+    const items = [];
+    const key = {};
+    let subject = o.subject || null;
+    let prev = null;
+    const hasContent = (op) => !!(op && (String(op.text || '').trim() || op.box));
+    (pages || []).forEach((pg) => {
+      (pg.answer_key || []).forEach((a) => { key[a.number] = a.answer; });
+      (pg.questions || []).forEach((q) => {
+        if (q.subject) subject = q.subject;
+        const options = (q.options || []).map((op) => ({ text: String(op.text || ''), box: op.box || null, unit: pg.unit }));
+        const figs = (q.figures || []).map((b) => ({ unit: pg.unit, box: b }));
+        const qbox = q.question_box ? [{ unit: pg.unit, box: q.question_box }] : [];
+        const continues = prev && (!q.starts_here || !q.number || (q.number === prev.num && (prev.open || !options.some(hasContent) || !prev.options.some(hasContent))));
+        if (continues) {
+          const t = String(q.text || '').trim();
+          if (t) {
+            if (prev.options.some(hasContent) && !options.some(hasContent)) {
+              // Text after the options have started belongs to the last option.
+              const last = prev.options[prev.options.length - 1];
+              last.text = (last.text + ' ' + t).trim();
+            } else {
+              prev.body = prev.body ? prev.body + (LIST_START.test(t) || /[:?]$/.test(prev.body) ? '\n' : ' ') + t : t;
+            }
+          }
+          const kept = prev.options.filter(hasContent);
+          prev.options = kept.concat(options.filter(hasContent));
+          prev.figs = prev.figs.concat(figs);
+          prev.qboxes = prev.qboxes.concat(qbox);
+          if (prev.pages.indexOf(pg.label) < 0) prev.pages.push(pg.label);
+          prev.open = q.ends_here === false;
+          if (!prev.chapter_id && q.chapter_id) prev.chapter_id = q.chapter_id;
+          if (!prev.printed_answer && q.printed_answer) prev.printed_answer = q.printed_answer;
+          return;
+        }
+        prev = {
+          num: q.number || null, subject: q.subject || subject, chapter_id: q.chapter_id || null, difficulty: q.difficulty || 'medium', qtype: q.qtype || 'single',
+          body: String(q.text || '').trim(), options, figs, qboxes: qbox, printed_answer: q.printed_answer || 0,
+          pages: [pg.label], open: q.ends_here === false, orphan: !q.starts_here || !q.number,
+        };
+        items.push(prev);
+      });
+    });
+    // Unnumbered pieces with nothing before them get the next free number so they can still be checked.
+    let last = 0;
+    items.forEach((it) => { if (!it.num) it.num = last + 1; last = it.num; });
+    return { items, key };
+  }
+
+  // Tidies a diagram cut from a scan. data is RGBA (changed in place). With clean, coloured marks (watermarks, pen,
+  // highlighter) and the paper tint become white and the print is darkened. Then slivers of neighbouring text that
+  // touch the edge of the cut are dropped and empty margins trimmed. Returns the rectangle to keep.
+  function tidyFigure(data, w, h, opts) {
+    const o = opts || {};
+    const ink = new Uint8Array(w * h);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const sat = Math.max(r, g, b) - Math.min(r, g, b);
+      let v = (r * 0.3 + g * 0.59 + b * 0.11) | 0;
+      if (o.clean) {
+        if (sat > 60 || (sat > 30 && v > 70)) v = 255;
+        else if (v > 196) v = 255;
+        else v = Math.max(0, Math.round((v - 30) * 255 / 166));
+        data[i] = data[i + 1] = data[i + 2] = v; data[i + 3] = 255;
+      }
+      if (v < 150 && !(sat > 60 && !o.clean)) ink[p] = 1;
+    }
+    const rowInk = (y, x0, x1) => { let n = 0; for (let x = x0; x < x1; x++) n += ink[y * w + x]; return n; };
+    const colInk = (x, y0, y1) => { let n = 0; for (let y = y0; y < y1; y++) n += ink[y * w + x]; return n; };
+    let x0 = 0, y0 = 0, x1 = w, y1 = h;
+    const GAP = Math.max(3, Math.round(Math.min(w, h) * 0.012));
+    // A run of empty lines within the outer 22% after ink touching the edge: cut there.
+    const cutFrom = (len, inkAt, fromEnd) => {
+      const at = (k) => inkAt(fromEnd ? len - 1 - k : k);
+      if (!(at(0) || at(1) || at(2))) return 0;
+      let blank = 0;
+      for (let k = 3; k < Math.floor(len * 0.22); k++) {
+        if (at(k) === 0) { blank++; if (blank >= GAP) return k + 1 - Math.floor(GAP / 2); } else blank = 0;
+      }
+      return 0;
+    };
+    for (let pass = 0; pass < 2; pass++) {
+      y0 += cutFrom(y1 - y0, (k) => rowInk(y0 + k, x0, x1), false);
+      y1 -= cutFrom(y1 - y0, (k) => rowInk(y0 + k, x0, x1), true);
+      x0 += cutFrom(x1 - x0, (k) => colInk(x0 + k, y0, y1), false);
+      x1 -= cutFrom(x1 - x0, (k) => colInk(x0 + k, y0, y1), true);
+    }
+    // Trim empty margins, keeping a little white around the drawing.
+    let tx0 = x1, ty0 = y1, tx1 = x0 - 1, ty1 = y0 - 1;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (ink[y * w + x]) { if (x < tx0) tx0 = x; if (x > tx1) tx1 = x; if (y < ty0) ty0 = y; if (y > ty1) ty1 = y; }
+    if (tx1 < tx0) return { x: 0, y: 0, w, h };
+    const m = Math.max(6, Math.round(Math.min(w, h) * 0.03));
+    const rx0 = Math.max(0, tx0 - m), ry0 = Math.max(0, ty0 - m), rx1 = Math.min(w, tx1 + 1 + m), ry1 = Math.min(h, ty1 + 1 + m);
+    if ((rx1 - rx0) * (ry1 - ry0) < w * h * 0.02) return { x: 0, y: 0, w, h };
+    return { x: rx0, y: ry0, w: rx1 - rx0, h: ry1 - ry0 };
+  }
+
+  // Milliseconds until Google's free daily allowance resets (midnight in California).
+  function msToPacificMidnight(now) {
+    const d = new Date(now == null ? Date.now() : now);
+    const parts = {};
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      .formatToParts(d).forEach((p) => { parts[p.type] = Number(p.value); });
+    const h = parts.hour === 24 ? 0 : parts.hour;
+    return ((23 - h) * 3600 + (59 - parts.minute) * 60 + (60 - parts.second)) * 1000;
+  }
+
   /* ---------------- Small helpers ---------------- */
 
   function paperCode(prefix, rng) {
@@ -749,7 +876,7 @@
     questionRegions, findFigures, assignFigures, sortReading,
     DEFAULT_SETTINGS, buildHistory, repStatus, gapDaysFor,
     MIXES, mulberry32, shuffle, apportion, buildPaper, nextReplacement,
-    scoreResponses, parsePasted, paperCode,
+    scoreResponses, parsePasted, paperCode, parseAnswerKey, mergeAiPages, msToPacificMidnight, tidyFigure,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Logic = api;
