@@ -455,8 +455,9 @@ ol.opts li img { max-height: 120px; display: block; background: #fff; border-rad
 /* Convert a scanned paper with AI */
 .ai-setup h2 { font-size: 1.05rem; }
 .ai-thumbs { display: flex; gap: 8px; overflow-x: auto; padding: 12px 2px 6px; -webkit-overflow-scrolling: touch; }
-.ai-thumbs figure { flex: 0 0 auto; margin: 0; position: relative; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px; background: var(--surface-2); }
-.ai-thumbs img { display: block; height: 84px; width: auto; background: #fff; border-radius: 3px; }
+.ai-thumbs figure { flex: 0 0 auto; margin: 0; position: relative; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px; background: var(--surface-2); cursor: pointer; }
+.ai-thumbs .tb { display: grid; place-items: center; width: 84px; height: 84px; }
+.ai-thumbs img { display: block; max-width: 84px; max-height: 84px; width: auto; height: auto; background: #fff; border-radius: 3px; transition: transform .2s ease; }
 .ai-thumbs figcaption { position: absolute; left: 6px; bottom: 6px; font: 600 .7rem/1 var(--font-mono); background: var(--surface); color: var(--ink); border-radius: 4px; padding: 3px 5px; }
 .ai-thumbs figure.off { opacity: .35; }
 .ai-thumbs figure.done { border-color: var(--good); box-shadow: inset 0 -3px 0 var(--good); }
@@ -485,3 +486,4 @@ ol.opts li img { max-height: 120px; display: block; background: #fff; border-rad
 .ai-sum-act { color: var(--accent); font-weight: 600; white-space: nowrap; }
 .ai-setup[open] > summary.ai-sum #aiSum { display: none; }
 .ai-setup[open] > summary.ai-sum { justify-content: flex-end; }
+.ai-keybox textarea { width: 100%; }
