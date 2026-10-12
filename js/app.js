@@ -13,7 +13,7 @@
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 10;
+  const APP_BUILD = 11;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -1706,7 +1706,7 @@
   async function aiCrop(st, u, box, pad, clean, raw) {
     const bmp = await aiBitmap(st, u.page);
     const r = unitRect(u);
-    const m = 8 + (pad || 0) * 15;
+    const m = 12 + (pad || 0) * 15;
     const y0 = Math.max(0, Math.floor(r.y + (box[0] - m) / 1000 * r.h)), x0 = Math.max(r.x, Math.floor(r.x + (box[1] - m) / 1000 * r.w));
     const y1 = Math.min(r.y + r.h, Math.ceil(r.y + (box[2] + m) / 1000 * r.h)), x1 = Math.min(r.x + r.w, Math.ceil(r.x + (box[3] + m) / 1000 * r.w));
     const w = Math.max(4, x1 - x0), h = Math.max(4, y1 - y0);
