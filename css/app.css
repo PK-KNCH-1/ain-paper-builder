@@ -487,3 +487,18 @@ ol.opts li img { max-height: 120px; display: block; background: #fff; border-rad
 .ai-setup[open] > summary.ai-sum #aiSum { display: none; }
 .ai-setup[open] > summary.ai-sum { justify-content: flex-end; }
 .ai-keybox textarea { width: 100%; }
+
+/* AI answers and solutions */
+.chip.ai { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.chip.ai-warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.ai-solve { margin-bottom: 12px; }
+.ai-solve .ai-bar { margin-top: 10px; }
+.ai-flag { margin-top: 10px; display: grid; gap: 8px; }
+.ai-flag .ai-note { color: var(--ink); }
+.ai-flag details summary { cursor: pointer; font-weight: 600; color: var(--accent); font-size: .86rem; }
+.ai-flag details .rich { margin-top: 6px; }
+.ai-flag .row { gap: 8px; }
+.sol-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sol-head label { font-weight: 600; font-size: .86rem; }
+.sol-head .hint { font-weight: 400; color: var(--muted); font-size: .8rem; }
+.ai-status { font-size: .82rem; color: var(--muted); }

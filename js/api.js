@@ -49,10 +49,20 @@
     return out;
   }
 
-  const QUESTION_FIELDS = ['chapter_id', 'topic', 'qtype', 'difficulty', 'body', 'options', 'answer', 'solution', 'images', 'source_type', 'source_note', 'archived'];
+  const QUESTION_FIELDS = ['chapter_id', 'topic', 'qtype', 'difficulty', 'body', 'options', 'answer', 'solution', 'images', 'source_type', 'source_note', 'archived', 'ai_answer', 'ai_solution', 'ai_flag'];
+  const AI_FIELDS = ['answer', 'solution', 'ai_answer', 'ai_solution', 'ai_flag'];
   const pick = (obj, keys) => keys.reduce((o, k) => { if (obj[k] !== undefined) o[k] = obj[k]; return o; }, {});
 
   const urlCache = new Map();
+
+  // The bank's "AI check" filter.
+  function checkFilter(q, check) {
+    if (check === 'nosol') return q.or('solution.is.null,solution.eq.');
+    if (check === 'flag') return q.not('ai_flag', 'is', null);
+    if (check === 'aians') return q.eq('ai_answer', true);
+    if (check === 'aisol') return q.eq('ai_solution', true);
+    return q;
+  }
 
   const Api = {
     /* ---- Sign-in ---- */
@@ -130,11 +140,32 @@
       if (f.mineUid) q = q.eq('created_by', f.mineUid);
       if (f.samplesOnly) q = q.eq('is_sample', true);
       if (f.search) q = q.ilike('body', '%' + f.search.replace(/[%_\\]/g, (c) => '\\' + c) + '%');
+      q = checkFilter(q, f.check);
       q = q.eq('archived', !!f.archived).order('created_at', { ascending: false }).order('id');
       const from = f.page * f.pageSize;
       const res = await q.range(from, from + f.pageSize - 1);
       if (res.error) throw friendly(res.error);
       return { rows: res.data || [], count: res.count || 0 };
+    },
+    // Every question matching the bank's filters that has no solution yet (for writing solutions with AI).
+    async questionsWithoutSolution(f) {
+      const search = f.search ? '%' + f.search.replace(/[%_\\]/g, (c) => '\\' + c) + '%' : null;
+      return fetchAll(() => {
+        let q = client().from('questions').select('*');
+        if (f.chapterIds && f.chapterIds.length) q = q.in('chapter_id', f.chapterIds);
+        if (f.difficulty) q = q.eq('difficulty', f.difficulty);
+        if (f.qtype) q = q.eq('qtype', f.qtype);
+        if (f.source) q = q.eq('source_type', f.source);
+        if (f.mineUid) q = q.eq('created_by', f.mineUid);
+        if (f.samplesOnly) q = q.eq('is_sample', true);
+        if (search) q = q.ilike('body', search);
+        if (f.check !== 'nosol') q = checkFilter(q, f.check);
+        return checkFilter(q, 'nosol').eq('archived', !!f.archived).order('created_at', { ascending: false }).order('id');
+      });
+    },
+    // Saves what the AI found for one question: the answer, the solution and the AI marks.
+    async saveAiResult(id, patch) {
+      return unwrap(await client().from('questions').update(pick(patch, AI_FIELDS)).eq('id', id).select().single());
     },
     async questionsByIds(ids) {
       const uniq = [...new Set(ids)];

@@ -10,10 +10,11 @@
   const QTYPES = { single: 'Single correct', assertion: 'Assertion–Reason', statement: 'Two statements', match: 'Match the lists', other: 'Other' };
   const SOURCES = { own: 'Our own', pyq: 'NEET previous year', book: 'Book', institute: 'Other institute', other: 'Other' };
   const DIFFS = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
+  const BANK_CHECKS = { nosol: 'No solution yet', flag: 'AI has a doubt', aians: 'Answer by AI', aisol: 'Solution by AI' };
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 12;
+  const APP_BUILD = 13;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -92,7 +93,8 @@
     qcache: new Map(),
     actions: {},
     builder: {},
-    bank: { subject: '', chapter: '', difficulty: '', qtype: '', source: '', mine: false, search: '', archived: false, samples: false, page: 0 },
+    bank: { subject: '', chapter: '', difficulty: '', qtype: '', source: '', check: '', mine: false, search: '', archived: false, samples: false, page: 0 },
+    bankSolve: null,
     homeMentor: null,
     paperTab: 'paper',
     adminTab: 'people',
@@ -1004,10 +1006,12 @@
       '<label class="field">Difficulty<select id="fDiff"><option value="">Any</option>' + mapOptions(DIFFS, f.difficulty) + '</select></label>' +
       '<label class="field">Type<select id="fType"><option value="">Any</option>' + mapOptions(QTYPES, f.qtype) + '</select></label>' +
       '<label class="field">Source<select id="fSource"><option value="">Any</option>' + mapOptions(SOURCES, f.source) + '</select></label>' +
+      '<label class="field">Answer and solution<select id="fCheck"><option value="">Any</option>' + mapOptions(BANK_CHECKS, f.check) + '</select></label>' +
       '<label class="field wide">Search question text<input type="search" id="fSearch" value="' + esc(f.search) + '" placeholder="e.g. pacemaker"></label>' +
       '</div><div class="row"><label class="check"><input type="checkbox" id="fMine"' + (f.mine ? ' checked' : '') + '> Added by me</label>' +
       '<label class="check"><input type="checkbox" id="fSamples"' + (f.samples ? ' checked' : '') + '> Samples only</label>' +
-      '<label class="check"><input type="checkbox" id="fArchived"' + (f.archived ? ' checked' : '') + '> Show archived</label></div></div>' +
+      '<label class="check"><input type="checkbox" id="fArchived"' + (f.archived ? ' checked' : '') + '> Show archived</label><span class="spacer"></span><span id="bankAiBtn"></span></div></div>' +
+      '<div id="bankAi"></div>' +
       '<div id="bankList">' + loadingHTML() + '</div>';
 
     const reload = () => { f.page = 0; loadList(); };
@@ -1016,6 +1020,7 @@
     $('#fDiff').addEventListener('change', (e) => { f.difficulty = e.target.value; reload(); });
     $('#fType').addEventListener('change', (e) => { f.qtype = e.target.value; reload(); });
     $('#fSource').addEventListener('change', (e) => { f.source = e.target.value; reload(); });
+    $('#fCheck').addEventListener('change', (e) => { f.check = e.target.value; reload(); });
     $('#fSearch').addEventListener('input', debounce((e) => { f.search = e.target.value.trim(); reload(); }, 350));
     $('#fMine').addEventListener('change', (e) => { f.mine = e.target.checked; reload(); });
     $('#fSamples').addEventListener('change', (e) => { f.samples = e.target.checked; reload(); });
@@ -1031,27 +1036,33 @@
           '<div id="sampleConfirm" hidden style="margin-top:10px">Remove all ' + samples + ' sample questions? Papers that used them will show “question removed”. <button class="btn sm danger solid" data-act="del-samples">Yes, remove</button> <button class="btn sm" data-act="keep-samples">Keep</button></div>' : 'The admin can remove them later.') + '</div>' : '';
     }
 
-    async function loadList() {
-      const box = $('#bankList');
-      box.innerHTML = loadingHTML();
+    function filterArgs() {
       let chapterIds = null;
       if (f.chapter) chapterIds = [Number(f.chapter)];
       else if (f.subject) chapterIds = S.chapters.filter((c) => c.subject_id === Number(f.subject)).map((c) => c.id);
-      const res = await Api.listQuestions({ chapterIds, difficulty: f.difficulty, qtype: f.qtype, source: f.source, mineUid: f.mine ? S.me.id : null, samplesOnly: f.samples, search: f.search, archived: f.archived, page: f.page, pageSize });
+      return { chapterIds, difficulty: f.difficulty, qtype: f.qtype, source: f.source, check: f.check, mineUid: f.mine ? S.me.id : null, samplesOnly: f.samples, search: f.search, archived: f.archived };
+    }
+
+    async function loadList() {
+      const box = $('#bankList');
+      box.innerHTML = loadingHTML();
+      const res = await Api.listQuestions(Object.assign(filterArgs(), { page: f.page, pageSize }));
       if (stale(token)) return;
       res.rows.forEach((q) => S.qcache.set(q.id, q));
       const pages = Math.max(1, Math.ceil(res.count / pageSize));
       if (!res.rows.length) {
-        box.innerHTML = '<div class="panel empty"><h2>No questions match</h2><p>' + (f.search || f.chapter || f.subject || f.difficulty ? 'Try fewer filters.' : 'Add questions one by one, or paste many at once from a PDF.') + '</p><a class="btn primary" href="#/q/new">Add question</a></div>';
+        box.innerHTML = '<div class="panel empty"><h2>No questions match</h2><p>' + (f.search || f.chapter || f.subject || f.difficulty || f.check ? 'Try fewer filters.' : 'Add questions one by one, or paste many at once from a PDF.') + '</p><a class="btn primary" href="#/q/new">Add question</a></div>';
         return;
       }
       box.innerHTML = '<p class="muted small" style="margin-bottom:10px">' + res.count + ' question' + (res.count === 1 ? '' : 's') + '</p>' +
         res.rows.map((q) => '<article class="qcard"><div class="meta"><b>' + esc(chapterName(q.chapter_id)) + '</b> · ' + esc((subjectOfChapter(q.chapter_id) || {}).name || '') + ' ' + chipDiff(q.difficulty) +
-          '<span class="chip">' + esc(QTYPES[q.qtype] || q.qtype) + '</span>' + (q.is_sample ? '<span class="chip sample">Sample</span>' : '') + (q.archived ? '<span class="chip">Archived</span>' : '') + (q.topic ? '<span class="muted">· ' + esc(q.topic) + '</span>' : '') + '</div>' +
+          '<span class="chip">' + esc(QTYPES[q.qtype] || q.qtype) + '</span>' + (q.is_sample ? '<span class="chip sample">Sample</span>' : '') + (q.archived ? '<span class="chip">Archived</span>' : '') + aiChipsHTML(q) + (q.topic ? '<span class="muted">· ' + esc(q.topic) + '</span>' : '') + '</div>' +
           questionHTML(q, { showAnswer: true }) +
           (q.solution ? '<details><summary>Solution</summary><div class="rich" style="margin-top:6px">' + rich(q.solution) + '</div></details>' : '') +
+          aiFlagHTML(q, canEdit(q) ? q.id : null) +
           '<div class="foot"><span>' + esc(SOURCES[q.source_type] || q.source_type) + (q.source_note ? ': ' + esc(q.source_note) : '') + ' · added by ' + esc(q.created_by ? personName(q.created_by) : 'setup') + ' · ' + esc(fmtDate(q.created_at)) + '</span>' +
-          '<span class="row">' + (canEdit(q) ? '<a class="btn sm" href="#/q/' + q.id + '">Edit</a><button class="btn ghost sm" data-act="archive" data-id="' + q.id + '" data-v="' + (!q.archived) + '">' + (q.archived ? 'Restore' : 'Archive') + '</button>' : '') +
+          '<span class="row">' + (canEdit(q) && !q.ai_flag && (q.ai_answer || (q.ai_solution && q.solution)) ? '<button class="btn ghost sm" data-act="ai-checked" data-ref="' + q.id + '" title="You have checked the AI’s answer and solution">Mark AI work checked</button>' : '') +
+          (canEdit(q) ? '<a class="btn sm" href="#/q/' + q.id + '">Edit</a><button class="btn ghost sm" data-act="archive" data-id="' + q.id + '" data-v="' + (!q.archived) + '">' + (q.archived ? 'Restore' : 'Archive') + '</button>' : '') +
           (isAdmin() ? '<button class="btn ghost sm" data-act="ask-del-q" data-id="' + q.id + '">Delete</button>' : '') + '</span></div>' +
           '<div class="notice bad" id="dq-' + q.id + '" hidden style="margin-top:10px">Delete this question for good? Papers that used it will show “question removed”. Archive keeps it on old papers instead. ' +
           '<button class="btn sm danger solid" data-act="del-q" data-id="' + q.id + '">Delete</button> <button class="btn sm" data-act="keep-q" data-id="' + q.id + '">Keep</button></div></article>').join('') +
@@ -1075,7 +1086,110 @@
     S.actions['keep-samples'] = () => { $('#sampleConfirm').hidden = true; };
     S.actions['del-samples'] = async (b) => { busy(b, true, 'Removing…'); await Api.deleteSamples(); invalidateMeta(); toast('Sample questions removed'); sampleNote(); loadList(); };
 
+    /* ---- What the AI found, settled from the bank ---- */
+    const saveAi = async (b, id, patch, msg) => {
+      busy(b, true);
+      try { const row = await Api.saveAiResult(id, patch); S.qcache.set(id, row); if (msg) toast(msg); loadList(); }
+      catch (e) { fail(e); busy(b, false); }
+    };
+    const aiBankItem = (q) => ({
+      q, subject: (subjectOfChapter(q.chapter_id) || {}).name || '', chapter: chapterName(q.chapter_id), qtype: q.qtype, body: q.body, key: q.answer,
+      options: (q.options || []).map((o) => ({ text: o.text || '', image: o.image || null })), figures: (q.images || []).slice(),
+    });
+    S.actions['ai-use'] = (b) => {
+      const q = S.qcache.get(b.dataset.ref), fl = q && q.ai_flag;
+      if (!fl) return;
+      saveAi(b, q.id, { answer: fl.ai, solution: fl.solution || q.solution || null, ai_answer: false, ai_solution: !!fl.solution, ai_flag: null }, 'Answer changed to (' + fl.ai + ')');
+    };
+    S.actions['ai-keep'] = async (b) => {
+      const q = S.qcache.get(b.dataset.ref);
+      if (!q || !q.ai_flag) return;
+      busy(b, true, 'Writing a solution for (' + q.answer + ')…');
+      let patch = { ai_flag: null, ai_answer: false }, msg = 'Kept (' + q.answer + ')';
+      if (!String(q.solution || '').trim()) {
+        let out = null;
+        const job = aiSolveJob([aiBankItem(q)], { mode: 'explain', onResult: (x, res) => { out = res; } });
+        await job.promise;
+        if (out && out.kind === 'explained') { patch = Object.assign(aiPatch(out), patch); msg = 'Kept (' + q.answer + ') and the AI wrote its solution'; }
+        else if (out) msg = 'Kept (' + q.answer + '). The AI could not work its way to it' + (out.note ? ' (' + out.note + ')' : '') + ', so add the solution yourself.';
+        else if (job.halt) { busy(b, false); toast(job.halt.message, 'bad'); return; }
+      }
+      saveAi(b, q.id, patch, msg);
+    };
+    S.actions['ai-ok'] = (b) => {
+      const q = S.qcache.get(b.dataset.ref);
+      if (!q) return;
+      saveAi(b, q.id, Object.assign({ ai_flag: null }, q.ai_flag && q.ai_flag.kind === 'unsure' ? { ai_answer: false } : {}), 'Marked as checked');
+    };
+    S.actions['ai-checked'] = (b) => saveAi(b, b.dataset.ref, { ai_answer: false, ai_solution: false }, 'Marked as checked');
+
+    /* ---- Writing the missing solutions for the whole list ---- */
+    const bs = () => S.bankSolve;
+    function renderBulk() {
+      if (stale(token)) return;
+      const btn = $('#bankAiBtn'), box = $('#bankAi');
+      if (!btn || !box) return;
+      const b = bs(), job = b && b.job;
+      btn.innerHTML = aiReady() && !(job && job.running) && !(b && b.list) ? '<button class="btn sm" data-act="ai-bulk">Write missing solutions with AI</button>' : '';
+      if (!b) { box.innerHTML = ''; return; }
+      if (job && job.running) {
+        const pct = Math.round(((job.done + job.failed.length) / Math.max(1, job.total)) * 100);
+        box.innerHTML = '<div class="panel ai-solve"><div class="row" style="align-items:center"><b>' + (job.stopReq ? 'Stopping after the questions being worked on now…' : 'Writing solutions with AI… ' + job.done + ' of ' + job.total + ' done') + '</b>' +
+          (job.waiting ? '<span class="muted small">waiting for Google’s per-minute limit…</span>' : '') + '<span class="spacer"></span>' + (job.stopReq ? '' : '<button class="btn sm" data-act="ai-bulk-stop">Stop</button>') + '</div>' +
+          '<div class="ai-bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"><span style="width:' + Math.max(3, pct) + '%"></span></div>' +
+          '<p class="muted small" style="margin-top:6px">Each solution is saved as soon as it is written. Keep this tab open; you can use other pages of the website meanwhile.</p></div>';
+        return;
+      }
+      if (job) {
+        const flagged = (job.counts.key_wrong || 0) + (job.counts.disagree || 0);
+        box.innerHTML = '<div class="panel ai-solve"><p class="small">' + aiJobSummary(job, 'questions') + '</p><div class="row" style="margin-top:10px">' +
+          (flagged ? '<button class="btn sm" data-act="ai-bulk-flagged">Show the ' + flagged + ' to check</button>' : '') +
+          (job.left() && !job.halt ? '<button class="btn sm" data-act="ai-bulk">Do the rest</button>' : '') +
+          '<button class="btn ghost sm" data-act="ai-bulk-close">Close</button></div></div>';
+        return;
+      }
+      const n = b.list.length, uses = aiUsesFor(b.list);
+      box.innerHTML = '<div class="panel ai-solve">' + (n
+        ? '<p><b>' + n + ' question' + (n === 1 ? '' : 's') + ' in this list ' + (n === 1 ? 'has' : 'have') + ' no solution.</b></p>' +
+          '<p class="muted small" style="margin-top:6px">The AI works each one out without looking at the saved answer, then compares. Where they match, it writes the solution. Where it disagrees, the question is marked for you to decide (see “AI has a doubt” under Answer and solution), and gets no solution until you do. This takes about ' + uses + ' AI use' + (uses === 1 ? '' : 's') + (b.skipped ? '. ' + b.skipped + ' question' + (b.skipped === 1 ? ' was' : 's were') + ' left out because only the person who added ' + (b.skipped === 1 ? 'it' : 'them') + ' or the admin can change ' + (b.skipped === 1 ? 'it' : 'them') : '') + '.</p>' +
+          '<div class="row" style="margin-top:10px"><button class="btn primary sm" data-act="ai-bulk-go">Write ' + n + ' solution' + (n === 1 ? '' : 's') + '</button><button class="btn ghost sm" data-act="ai-bulk-close">Cancel</button></div>'
+        : '<p class="small">Every question in this list ' + (b.skipped ? 'that you can change ' : '') + 'already has a solution, or is waiting for you to check what the AI found.</p><div class="row" style="margin-top:10px"><button class="btn ghost sm" data-act="ai-bulk-close">Close</button></div>') + '</div>';
+    }
+    S.actions['ai-bulk'] = async (b) => {
+      if (bs() && bs().job && bs().job.running) return;
+      busy(b, true, 'Finding questions…');
+      try {
+        const all = await Api.questionsWithoutSolution(filterArgs());
+        const mine = all.filter((q) => canEdit(q));
+        const list = mine.filter((q) => !q.ai_flag && (q.options || []).length >= 2 && (String(q.body || '').trim() || (q.images || []).length)).map(aiBankItem);
+        S.bankSolve = { list, skipped: all.length - mine.length, ui: { token, render: renderBulk, reload: loadList } };
+        renderBulk();
+      } catch (e) { fail(e); busy(b, false); }
+    };
+    S.actions['ai-bulk-close'] = () => { S.bankSolve = null; renderBulk(); };
+    S.actions['ai-bulk-stop'] = () => { const b = bs(); if (b && b.job) b.job.stop(); };
+    S.actions['ai-bulk-flagged'] = () => { S.bankSolve = null; f.check = 'flag'; $('#fCheck').value = 'flag'; reload(); renderBulk(); };
+    S.actions['ai-bulk-go'] = () => {
+      const b = bs();
+      if (!b || !b.list || !b.list.length || (b.job && b.job.running)) return;
+      const ui = () => { const u = S.bankSolve && S.bankSolve.ui; return u && !stale(u.token) ? u : null; };
+      b.job = aiSolveJob(b.list, {
+        onResult: async (x, res) => {
+          const row = await Api.saveAiResult(x.q.id, aiPatch(res));
+          S.qcache.set(row.id, row);
+          invalidateMeta();
+        },
+        onChange: () => { const u = ui(); if (u) u.render(); },
+      });
+      b.list = null;
+      b.job.promise.then(() => { const u = ui(); if (u) { u.render(); u.reload(); } });
+      renderBulk();
+    };
+    if (bs()) bs().ui = { token, render: renderBulk, reload: loadList };
+
     sampleNote().catch(fail);
+    renderBulk();
+    if (!aiReady()) aiStatus().then(renderBulk);
     await loadList();
   }
 
@@ -1089,6 +1203,7 @@
       if (stale(token)) return;
       if (!q) { main().innerHTML = '<div class="empty"><h2>Question not found</h2><a class="btn" href="#/bank">Back to bank</a></div>'; return; }
       q = JSON.parse(JSON.stringify(q));
+      q.solFor = q.ai_solution ? q.answer : null; // a saved AI solution always explains the saved answer
     } else {
       const last = S.lastEditor || {};
       q = { chapter_id: last.chapter_id || null, topic: last.topic || '', qtype: 'single', difficulty: last.difficulty || 'medium', body: '', options: [], answer: null, solution: '', images: [], source_type: last.source_type || 'own', source_note: last.source_note || '' };
@@ -1114,7 +1229,8 @@
       '<div class="help">Maths: <code>$v = u + at$</code> · fractions <code>$\\dfrac{1}{2}mv^2$</code> · chemistry <code>\\ce{H2SO4}</code> or <code>\\ce{N2 + 3H2 -> 2NH3}</code> · bold <code>**Assertion (A):**</code> · tables: lines like <code>| A. Cerebellum | I. Balance |</code></div>' +
       '<div><div class="row"><b class="small">Diagrams for the question</b><label class="btn sm"><input type="file" id="eImgs" accept="image/*" multiple hidden>Add image</label></div><div class="img-tiles" id="imgTiles"></div></div>' +
       '<div><div class="small" style="font-weight:600;margin-bottom:8px">Options <span class="muted" style="font-weight:400">· tap the number of the correct one</span></div><div id="optsBox"></div></div>' +
-      '<label class="field">Solution<span class="hint">Shown in the solutions booklet</span><textarea id="eSol" class="q-input" rows="3">' + esc(q.solution || '') + '</textarea></label>' +
+      '<div class="field"><div class="sol-head"><label for="eSol">Solution</label><span class="hint">Shown in the solutions booklet</span><span class="spacer"></span><span id="eAiBtn"></span></div>' +
+      '<div id="eAiNote"></div><textarea id="eSol" class="q-input" rows="3">' + esc(q.solution || '') + '</textarea></div>' +
       '<div class="form-grid"><label class="field">Source<select id="eSource">' + mapOptions(SOURCES, q.source_type) + '</select></label>' +
       '<label class="field">Source details<span class="hint">e.g. NEET 2023, HC Verma Ch 5</span><input id="eSourceNote" type="text" maxlength="160" value="' + esc(q.source_note || '') + '"></label></div>' +
       '</fieldset>' +
@@ -1141,7 +1257,12 @@
         (o.image ? '<div class="img-tiles opt-img"><div class="img-tile">' + imgTag(o.image) + (editable ? '<button type="button" data-act="rm-opt-img" data-i="' + i + '" aria-label="Remove image">×</button>' : '') + '</div></div>' : '') + '</div>' +
         '<label class="btn ghost sm" title="Add an image to this option"><input type="file" accept="image/*" data-optimg="' + i + '" hidden>Image</label></div>').join('');
       $$('#optsBox textarea').forEach((t) => t.addEventListener('input', () => { q.options[Number(t.dataset.opt)].text = t.value; previewSoon(); }));
-      $$('#optsBox input[name=eAns]').forEach((r) => r.addEventListener('change', () => { q.answer = Number(r.value); previewSoon(); }));
+      $$('#optsBox input[name=eAns]').forEach((r) => r.addEventListener('change', () => {
+        const msg = aiAnswerChanged(q, Number(r.value));
+        q.answer = Number(r.value);
+        if (msg) { toast(msg); $('#eSol').value = q.solution || ''; }
+        renderAi(); previewSoon();
+      }));
       $$('#optsBox input[data-optimg]').forEach((inp) => inp.addEventListener('change', async () => {
         const file = inp.files[0];
         if (!file) return;
@@ -1181,12 +1302,75 @@
       const files = Array.from((e.clipboardData && e.clipboardData.files) || []).filter((f) => /^image\//.test(f.type));
       if (files.length && editable) { e.preventDefault(); addImages(files); }
     });
-    $('#eSol').addEventListener('input', (e) => { q.solution = e.target.value; previewSoon(); });
+    $('#eSol').addEventListener('input', (e) => { q.solution = e.target.value; if (q.ai_solution) { q.ai_solution = false; q.solFor = null; renderAi(); } previewSoon(); });
     $('#eSource').addEventListener('change', (e) => { q.source_type = e.target.value; });
     $('#eSourceNote').addEventListener('input', (e) => { q.source_note = e.target.value; });
     $('#eImgs').addEventListener('change', (e) => { addImages(Array.from(e.target.files || [])); e.target.value = ''; });
     S.actions['rm-img'] = (b) => { q.images.splice(Number(b.dataset.i), 1); renderImages(); preview(); };
     S.actions['rm-opt-img'] = (b) => { q.options[Number(b.dataset.i)].image = null; renderOptions(); preview(); };
+
+    // The AI's marks on this question, and the button that asks it for the answer and solution.
+    let aiBusy = false;
+    function renderAi() {
+      const note = $('#eAiNote'), btnBox = $('#eAiBtn');
+      if (!note) return;
+      const marks = [];
+      if (q.ai_answer) marks.push('the answer was picked by the AI');
+      if (q.ai_solution && String(q.solution || '').trim()) marks.push('the solution was written by the AI');
+      note.innerHTML = q.ai_flag ? aiFlagHTML(q, editable ? 'q' : null)
+        : marks.length ? '<div class="notice ai-flag"><span>' + esc(marks.join(' and ').replace(/^./, (c) => c.toUpperCase())) + '. Nobody has checked ' + (marks.length > 1 ? 'them' : 'it') + ' yet.</span>' +
+          (editable ? '<div class="row"><button type="button" class="btn sm ghost" data-act="ai-checked">Mark as checked</button></div>' : '') + '</div>' : '';
+      if (btnBox) btnBox.innerHTML = !editable || !aiReady() ? '' : aiBusy ? '<span class="ai-status">The AI is working it out…</span>'
+        : '<button type="button" class="btn sm" data-act="ai-write">' + (String(q.solution || '').trim() ? 'Rewrite with AI' : q.answer ? 'Write with AI' : 'Answer and solve with AI') + '</button>';
+    }
+    const aiItemOf = () => {
+      const subj = S.subjectById.get(Number(subjectId));
+      return { subject: subj ? subj.name : '', chapter: q.chapter_id ? chapterName(q.chapter_id) : '', qtype: q.qtype, body: q.body, key: q.answer || null,
+        options: q.options.map((o) => ({ text: o.text || '', image: o.image || null })), figures: q.images.slice() };
+    };
+    async function askAi(mode) {
+      let out = null;
+      aiBusy = true; renderAi();
+      const job = aiSolveJob([aiItemOf()], { mode, onResult: (x, res) => { out = res; } });
+      await job.promise;
+      aiBusy = false;
+      if (stale(token)) return null;
+      if (!out) toast(job.halt ? job.halt.message : job.failed.length ? 'The AI could not do this question: ' + job.failed[0].message : 'The AI did not answer.', 'bad');
+      return out;
+    }
+    const showAiWork = () => { renderOptions(); $('#eSol').value = q.solution || ''; renderAi(); preview(); };
+    S.actions['ai-write'] = async () => {
+      if (aiBusy) return;
+      if (!q.body.trim() && !q.images.length) { toast('Write the question first.', 'bad'); return; }
+      const missing = q.options.findIndex((o) => !String(o.text || '').trim() && !o.image);
+      if (missing > -1) { toast('Option ' + (missing + 1) + ' is empty. Fill in all the options first.', 'bad'); return; }
+      if (String(q.solution || '').trim() && !q.ai_solution && !confirm('Replace your solution with one written by the AI?')) return;
+      const res = await askAi('solve');
+      if (!res) { renderAi(); return; }
+      Object.assign(q, aiPatch(res));
+      showAiWork();
+      toast(res.kind === 'answered' ? 'The AI picked option (' + res.answer + '). Check it, then save.' : res.kind === 'agree' ? 'The AI agrees with option (' + res.answer + ') and wrote the solution. Save to keep it.' : 'The AI does not agree with the answer. See the note above the solution.');
+    };
+    S.actions['ai-use'] = () => {
+      const f = q.ai_flag;
+      if (!f) return;
+      Object.assign(q, { answer: f.ai, solution: f.solution || q.solution, solFor: f.ai, ai_solution: !!f.solution, ai_answer: false, ai_flag: null });
+      showAiWork();
+      toast('Changed to option (' + f.ai + '). Save to keep it.');
+    };
+    S.actions['ai-keep'] = async () => {
+      if (!q.ai_flag || aiBusy) return;
+      Object.assign(q, { ai_flag: null, ai_answer: false });
+      renderAi();
+      if (String(q.solution || '').trim()) return;
+      const res = await askAi('explain');
+      if (!res) { renderAi(); return; }
+      if (res.kind === 'explained') { Object.assign(q, aiPatch(res)); toast('The AI wrote a solution for option (' + q.answer + '). Save to keep it.'); }
+      else toast('The AI could not work its way to option (' + q.answer + ')' + (res.note ? ': ' + res.note : '.') + ' Type the solution yourself.', 'bad');
+      showAiWork();
+    };
+    S.actions['ai-ok'] = () => { if (q.ai_flag && q.ai_flag.kind === 'unsure') q.ai_answer = false; q.ai_flag = null; renderAi(); };
+    S.actions['ai-checked'] = () => { q.ai_answer = false; q.ai_solution = false; renderAi(); toast('Marked as checked. Save to keep it.'); };
 
     function validate() {
       if (!q.chapter_id) return 'Choose a chapter.';
@@ -1220,6 +1404,263 @@
     renderImages();
     renderOptions();
     preview();
+    renderAi();
+    if (editable && !aiReady()) aiStatus().then(() => { if (!stale(token)) renderAi(); });
+  }
+
+  /* ================= AI answers and solutions ================= */
+  // Questions go to the AI a few at a time. It first works each one out without seeing the answer key; where it
+  // disagrees with the key it is asked again with the key shown. A solution that explains a different option from
+  // the question's answer is never saved as the solution: it waits in ai_flag until a person decides.
+
+  const SOLVE_GROUP = { Physics: 6, Chemistry: 6, Botany: 12, Zoology: 12 };
+  const SOLVE_GROUP_OTHER = 6;
+  const SOLVE_RECHECK_GROUP = 4;
+  const SOLVE_MAX_PICS = 20;
+  const AI_STOPS = ['day', 'my_limit', 'key', 'not_configured', 'not_allowed', 'auth'];
+
+  let aiStatusMemo = null;
+  // Whether this person may use the AI. Asked once every few minutes.
+  async function aiStatus(force) {
+    if (force || !aiStatusMemo || Date.now() - aiStatusMemo.at > 5 * 60000) {
+      let s;
+      try { s = await Api.ai('status'); } catch (e) { s = { error: e.message }; }
+      aiStatusMemo = { at: Date.now(), s };
+    }
+    return aiStatusMemo.s;
+  }
+  const aiReady = () => !!(aiStatusMemo && aiStatusMemo.s && aiStatusMemo.s.allowed);
+
+  // A picture as a small JPEG for the AI. src is a Blob, a blob: or data: address, or a path in storage.
+  async function aiPicture(src) {
+    let blob = src instanceof Blob ? src : null;
+    if (!blob) {
+      let url = String(src || '');
+      if (!/^(blob:|data:)/.test(url)) url = (await Api.signedUrls([url]))[url];
+      if (!url) throw new Error('A picture could not be loaded.');
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('A picture could not be loaded.');
+      blob = await r.blob();
+    }
+    const obj = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('A picture could not be read.')); i.src = obj; });
+      const w = img.naturalWidth || 400, h = img.naturalHeight || 300;
+      const scale = Math.min(1, 1200 / Math.max(w, h));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * scale)); c.height = Math.max(1, Math.round(h * scale));
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      return { data: c.toDataURL('image/jpeg', 0.85).replace(/^data:[^,]*,/, ''), mime: 'image/jpeg' };
+    } finally { URL.revokeObjectURL(obj); }
+  }
+
+  const aiPicsOf = (it) => (it.figures || []).length + (it.options || []).filter((o) => o.image).length;
+  // Questions grouped by subject, a few per request: Biology questions are quick, numericals with diagrams are not.
+  function aiGroups(items, sizeOf) {
+    const bySubject = new Map();
+    items.forEach((it) => { const s = it.subject || ''; if (!bySubject.has(s)) bySubject.set(s, []); bySubject.get(s).push(it); });
+    const out = [];
+    for (const [s, list] of bySubject) {
+      const size = sizeOf(s);
+      let cur = [], pics = 0;
+      for (const it of list) {
+        const p = aiPicsOf(it);
+        if (cur.length && (cur.length >= size || pics + p > SOLVE_MAX_PICS)) { out.push(cur); cur = []; pics = 0; }
+        cur.push(it); pics += p;
+      }
+      if (cur.length) out.push(cur);
+    }
+    return out;
+  }
+  const solveGroupSize = (s) => SOLVE_GROUP[s] || SOLVE_GROUP_OTHER;
+  const aiUsesFor = (items) => aiGroups(items, solveGroupSize).length;
+
+  // Runs the AI over a list of questions. Each item: { subject, chapter, qtype, body, options: [{ text, image }],
+  // figures: [picture], key (the answer it has now, if any) }. mode 'explain' writes solutions for answers a person confirmed.
+  // opts.onResult(item, result) may return a promise; opts.onChange() runs after every step.
+  // result.kind: 'answered' (no key; the AI picked), 'agree', 'key_wrong', 'disagree', or for explain 'explained' / 'not_explained'.
+  function aiSolveJob(items, opts) {
+    const o = opts || {};
+    const job = { total: items.length, done: 0, failed: [], halt: null, running: true, stopReq: false, waiting: false, counts: {} };
+    const change = () => { try { if (o.onChange) o.onChange(job); } catch (e) { console.error(e); } };
+    const pics = new Map();
+    const pic = (src) => { const k = src instanceof Blob ? src : String(src); if (!pics.has(k)) pics.set(k, aiPicture(src).catch(() => null)); return pics.get(k); };
+    const firstMode = o.mode === 'explain' ? 'explain' : 'solve';
+    const queue = (firstMode === 'explain' ? aiGroups(items, () => SOLVE_RECHECK_GROUP) : aiGroups(items, solveGroupSize)).map((g) => ({ mode: firstMode, items: g, tries: 0 }));
+    items.forEach((it) => { it.aiState = 'queued'; });
+
+    async function finish(it, res) {
+      it.aiState = '';
+      let kind = res.kind;
+      // onResult may say how the result was used in the end (the answer can change while the AI works).
+      try { if (o.onResult) kind = (await o.onResult(it, res)) || kind; }
+      catch (e) { it.aiState = 'failed'; job.failed.push({ item: it, message: e.message }); change(); return; }
+      job.done++;
+      job.counts[kind] = (job.counts[kind] || 0) + 1;
+      change();
+    }
+    function failItem(it, message) { it.aiState = 'failed'; job.failed.push({ item: it, message }); change(); }
+
+    async function payload(task) {
+      const qs = [];
+      for (let k = 0; k < task.items.length; k++) {
+        const it = task.items[k];
+        const figures = (await Promise.all((it.figures || []).map(pic))).filter(Boolean);
+        const options = [];
+        for (const op of it.options) options.push({ text: op.text || '', image: op.image ? await pic(op.image) : null });
+        const q = { ref: 'Q' + (k + 1), subject: it.subject || undefined, chapter: it.chapter || undefined, qtype: it.qtype || undefined, body: it.body || '', options, figures };
+        if (task.mode !== 'solve') q.key = it.key;
+        if (task.mode === 'recheck') q.earlier = it.first.answer;
+        qs.push(q);
+      }
+      return qs;
+    }
+
+    async function handle(task, solutions) {
+      const byRef = new Map((solutions || []).map((s) => [s.ref, s]));
+      const rechecks = [], missing = [];
+      for (let k = 0; k < task.items.length; k++) {
+        const it = task.items[k];
+        const s = byRef.get('Q' + (k + 1));
+        if (!s) { missing.push(it); continue; }
+        const base = { answer: s.answer, solution: s.solution, note: s.problem || '', confidence: s.confidence, key: it.key || null };
+        if (task.mode === 'explain') await finish(it, Object.assign(base, { kind: s.answer === it.key ? 'explained' : 'not_explained' }));
+        else if (task.mode === 'solve') {
+          if (!it.key) await finish(it, Object.assign(base, { kind: 'answered' }));
+          else if (s.answer === it.key) await finish(it, Object.assign(base, { kind: 'agree' }));
+          else { it.first = s; rechecks.push(it); }
+        } else if (s.answer === it.key && s.key_verdict !== 'key_wrong') await finish(it, Object.assign(base, { kind: 'agree', rechecked: true }));
+        else if (s.answer !== it.key && (s.key_verdict === 'key_wrong' || s.key_verdict === 'question_flawed')) await finish(it, Object.assign(base, { kind: 'key_wrong' }));
+        else {
+          const use = s.answer !== it.key ? s : it.first;
+          await finish(it, Object.assign(base, { kind: 'disagree', answer: use.answer, solution: use.solution }));
+        }
+      }
+      for (let i = 0; i < rechecks.length; i += SOLVE_RECHECK_GROUP) queue.push({ mode: 'recheck', items: rechecks.slice(i, i + SOLVE_RECHECK_GROUP), tries: 0 });
+      if (missing.length) {
+        if (task.tries < 1) queue.push({ mode: task.mode, items: missing, tries: task.tries + 1 });
+        else missing.forEach((it) => (task.mode === 'recheck' ? finish(it, { kind: 'disagree', answer: it.first.answer, solution: it.first.solution, note: '', key: it.key }) : failItem(it, 'The AI skipped this question.')));
+      }
+    }
+
+    async function runTask(task) {
+      task.items.forEach((it) => { it.aiState = 'working'; });
+      change();
+      let qs;
+      try { qs = await payload(task); } catch (e) { task.items.forEach((it) => failItem(it, e.message)); return; }
+      for (let attempt = 0; ; attempt++) {
+        if (job.halt || job.stopReq) { task.items.forEach((it) => { it.aiState = 'queued'; }); queue.unshift(task); return; }
+        try {
+          const r = await Api.ai('solve', { mode: task.mode, questions: qs });
+          if (r.used_today && aiStatusMemo && aiStatusMemo.s) aiStatusMemo.s.used_today = r.used_today;
+          await handle(task, r.solutions);
+          return;
+        } catch (e) {
+          if (e.code === 'minute' && attempt < 8) { job.waiting = true; change(); await sleepMs(Math.min(90, e.retryAfter || 30) * 1000); job.waiting = false; continue; }
+          if (AI_STOPS.includes(e.code)) { job.halt = { code: e.code, message: e.message }; task.items.forEach((it) => { it.aiState = 'queued'; }); queue.unshift(task); change(); return; }
+          if (e.code === 'network' && attempt < 3) { await sleepMs(3000); continue; }
+          if (task.items.length > 1 && ['slow', 'failed', 'bad_request', 'network'].includes(e.code)) {
+            // Too much at once, or one question upsets it: try the halves separately.
+            const half = Math.ceil(task.items.length / 2);
+            queue.unshift({ mode: task.mode, items: task.items.slice(0, half), tries: task.tries }, { mode: task.mode, items: task.items.slice(half), tries: task.tries });
+            return;
+          }
+          if (e.code === 'failed' && attempt < 1) { await sleepMs(3000); continue; }
+          if (task.mode === 'recheck') { for (const it of task.items) await finish(it, { kind: 'disagree', answer: it.first.answer, solution: it.first.solution, note: '', key: it.key }); return; }
+          task.items.forEach((it) => failItem(it, e.message || 'The AI could not do this question.'));
+          return;
+        }
+      }
+    }
+
+    job.stop = () => { job.stopReq = true; change(); };
+    job.left = () => job.total - job.done - job.failed.length;
+    job.promise = (async () => {
+      await null; // the caller gets the job before the first update
+      let lock = null;
+      try { if (navigator.wakeLock) lock = await navigator.wakeLock.request('screen'); } catch (e) { lock = null; }
+      const worker = async () => { while (queue.length && !job.stopReq && !job.halt) await runTask(queue.shift()); };
+      change();
+      try { await Promise.all([worker(), worker()]); }
+      finally {
+        job.running = false;
+        items.forEach((it) => { if (it.aiState === 'queued' || it.aiState === 'working') it.aiState = ''; });
+        if (lock) lock.release().catch(() => {});
+        change();
+      }
+      return job;
+    })();
+    return job;
+  }
+
+  // What to change on a question once the AI has finished with it.
+  function aiPatch(res) {
+    const at = new Date().toISOString();
+    const noteFlag = res.note ? { kind: 'question_flawed', note: res.note, at } : null;
+    if (res.kind === 'answered') {
+      return { answer: res.answer, solution: res.solution, solFor: res.answer, ai_answer: true, ai_solution: true, ai_flag: noteFlag || (res.confidence === 'low' ? { kind: 'unsure', at } : null) };
+    }
+    if (res.kind === 'agree' || res.kind === 'explained') return { solution: res.solution, solFor: res.answer, ai_solution: true, ai_flag: noteFlag };
+    if (res.kind === 'not_explained') return {};
+    // The AI's answer is not the question's: its solution waits with the flag until a person decides.
+    return { ai_flag: { kind: res.kind, ai: res.answer, key: res.key, note: res.note || '', solution: res.solution, at } };
+  }
+
+  // A person, or the answer key, changed the answer of a question the AI has worked on. Returns a note for the person, or ''.
+  function aiAnswerChanged(q, answer) {
+    let msg = '';
+    const f = q.ai_flag;
+    if (f && (f.kind === 'key_wrong' || f.kind === 'disagree')) {
+      if (answer === f.ai && f.solution && !String(q.solution || '').trim()) { q.solution = f.solution; q.solFor = f.ai; q.ai_solution = true; msg = 'The AI’s solution for (' + f.ai + ') was put in.'; }
+      q.ai_flag = null;
+    } else if (f && f.kind === 'unsure') q.ai_flag = null;
+    if (q.ai_solution && q.solFor && q.solFor !== answer && String(q.solution || '').trim()) {
+      msg = 'The AI’s solution was for option (' + q.solFor + '), so it was taken out.';
+      q.solution = ''; q.ai_solution = false; q.solFor = null;
+    }
+    q.ai_answer = false;
+    return msg;
+  }
+
+  // The AI's marks on a question, as chips.
+  function aiChipsHTML(q) {
+    return (q.ai_answer ? '<span class="chip ai-warn" title="The AI picked this answer; nobody has checked it yet">Answer by AI</span>' : '') +
+      (q.ai_solution && String(q.solution || '').trim() ? '<span class="chip ai" title="The AI wrote this solution">Solution by AI</span>' : '');
+  }
+  // What the AI found wrong, with buttons to settle it. ref identifies the question to the buttons; no ref means read only.
+  function aiFlagHTML(q, ref) {
+    const f = q.ai_flag;
+    if (!f) return '';
+    const btn = (act, label, cls) => (ref == null ? '' : '<button type="button" class="btn sm ' + (cls || '') + '" data-act="' + act + '" data-ref="' + esc(ref) + '">' + label + '</button>');
+    const note = f.note ? ' <span class="ai-note">' + esc(f.note) + '</span>' : '';
+    if (f.kind === 'key_wrong' || f.kind === 'disagree') {
+      return '<div class="notice warn ai-flag"><b>' + (f.kind === 'key_wrong' ? 'The AI thinks the answer is (' + f.ai + '), not (' + f.key + ').' : 'The AI got (' + f.ai + '), not (' + f.key + '), and could not settle it on a second look.') + '</b>' + note +
+        (f.solution ? '<details><summary>The AI’s working for (' + f.ai + ')</summary><div class="rich">' + rich(f.solution) + '</div></details>' : '') +
+        (ref == null ? '' : '<div class="row">' + btn('ai-use', 'Change to (' + f.ai + ') with this solution') + btn('ai-keep', 'Keep (' + f.key + ')', 'ghost') + '</div>') + '</div>';
+    }
+    if (f.kind === 'question_flawed') return '<div class="notice warn ai-flag"><b>The AI thinks this question may have a mistake.</b>' + note + (ref == null ? '' : '<div class="row">' + btn('ai-ok', 'Checked: it’s fine', 'ghost') + '</div>') + '</div>';
+    if (f.kind === 'unsure') return '<div class="notice warn ai-flag"><b>The AI was not sure of its answer.</b> Please check it.' + (ref == null ? '' : '<div class="row">' + btn('ai-ok', 'Checked: it’s right', 'ghost') + '</div>') + '</div>';
+    return '';
+  }
+  // A line summing up a finished AI run.
+  function aiJobSummary(job, what) {
+    const c = job.counts, bits = [];
+    const agree = (c.agree || 0) + (c.explained || 0);
+    if (agree) bits.push(agree + ' solution' + (agree === 1 ? '' : 's') + ' written' + (c.agree ? ' (the AI agreed with the answer)' : ''));
+    if (c.answered) bits.push(c.answered + ' answered by the AI: check ' + (c.answered === 1 ? 'it' : 'them'));
+    const flagged = (c.key_wrong || 0) + (c.disagree || 0);
+    if (flagged) bits.push(flagged + ' where the AI disagrees with the answer');
+    if (c.not_explained) bits.push(c.not_explained + ' the AI could not explain');
+    if (job.failed.length) bits.push(job.failed.length + ' not done (' + job.failed[0].message + ')');
+    let html = bits.length ? esc(bits.join(' · ')) + '.' : '';
+    const left = job.left();
+    if (job.halt) {
+      html += ' <b>' + (job.halt.code === 'day' ? 'Google’s free AI allowance for today is used up' + (left ? ': ' + left + ' ' + what + ' left. It comes back at about ' + esc(aiResetText(L.msToPacificMidnight())) + '.' : '.')
+        : job.halt.code === 'key' ? 'Google did not accept the Gemini key.' : esc(job.halt.message)) + '</b>';
+    } else if (job.stopReq && left) html += ' Stopped with ' + left + ' ' + what + ' left.';
+    return html;
   }
 
   /* ================= Checking imported questions before saving ================= */
@@ -1246,63 +1687,115 @@
     };
     const touch = (it) => { it.touched = true; };
     const rerender = () => { const y = window.scrollY; render(); window.scrollTo(0, y); };
+    const myToken = S.viewToken;
+    // The AI keeps working if the mentor opens another page; this keeps whichever copy of the review is on screen up to date.
+    st.solveUi = (items) => { if (stale(myToken)) return; (items || []).forEach((it) => dirty.add(it)); refreshSoon(); };
+    const solving = () => !!(st.solve && st.solve.running);
+    const hasSolution = (it) => !!String(it.solution || '').trim();
+    const solveTargets = () => (st.parsed || []).filter((it) => it.include && !it.dup && it.body.trim() && optionsFilled(it) && !it.ai_flag && (!hasSolution(it) || !it.answer));
+    const subjectOf = (it) => it.subject || (it.chapter_id ? ((subjectOfChapter(it.chapter_id) || {}).name || '') : '');
+    const aiItem = (it) => ({
+      it, subject: subjectOf(it), chapter: it.chapter_id ? chapterName(it.chapter_id) : '', qtype: it.qtype || st.qtype || '',
+      body: it.body, key: it.answer || null,
+      options: it.options.map((t, k) => { const f = optImage(it, k); return { text: t, image: f ? f.blob || f.path || null : null }; }),
+      figures: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.blob || f.path).filter(Boolean),
+    });
+    // Puts what the AI found into a question. A solution the mentor typed is kept. If the mentor changed the answer
+    // while the AI was working, the AI's result is compared with the new answer instead.
+    const applyAi = (it, res, keyThen) => {
+      if (keyThen !== undefined && (it.answer || null) !== (keyThen || null) && ['answered', 'agree', 'key_wrong', 'disagree'].includes(res.kind)) {
+        res = Object.assign({}, res, { key: it.answer || null, kind: !it.answer ? 'answered' : it.answer === res.answer ? 'agree' : 'key_wrong' });
+      }
+      const p = aiPatch(res);
+      if (hasSolution(it) && !it.ai_solution) { delete p.solution; delete p.solFor; delete p.ai_solution; }
+      Object.assign(it, p);
+      if (p.answer) it.warnings = (it.warnings || []).filter((w) => w !== 'No answer found');
+      it.aiDirty = true;
+      touch(it);
+      return res.kind;
+    };
+    function aiSolveHTML() {
+      if (!aiReady()) return '';
+      const job = st.solve;
+      if (job && job.running) {
+        const pct = Math.round(((job.done + job.failed.length) / Math.max(1, job.total)) * 100);
+        return '<div class="panel ai-solve"><div class="row" style="align-items:center"><b>' + (job.stopReq ? 'Stopping after the questions being worked on now…' : 'Writing answers and solutions with AI… ' + job.done + ' of ' + job.total + ' done') + '</b>' +
+          (job.waiting ? '<span class="muted small">waiting for Google’s per-minute limit…</span>' : '') + '<span class="spacer"></span>' + (job.stopReq ? '' : '<button class="btn sm" data-act="ai-solve-stop">Stop</button>') + '</div>' +
+          '<div class="ai-bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"><span style="width:' + Math.max(3, pct) + '%"></span></div>' +
+          '<p class="muted small" style="margin-top:6px">You can keep checking questions meanwhile. Saving waits until the AI finishes.</p></div>';
+      }
+      const targets = solveTargets();
+      const noAnswer = targets.filter((it) => !it.answer).length;
+      const summary = job ? aiJobSummary(job, 'questions') : '';
+      if (!targets.length && !summary) return '';
+      return '<div class="panel ai-solve">' + (summary ? '<p class="small"' + (targets.length ? ' style="margin-bottom:10px"' : '') + '>' + summary + '</p>' : '') +
+        (targets.length ? '<div class="row" style="align-items:center;gap:12px"><button class="btn" data-act="ai-solve">Write ' + (noAnswer ? 'answers and solutions' : 'solutions') + ' with AI</button>' +
+          '<span class="muted small">' + targets.length + ' question' + (targets.length === 1 ? '' : 's') + ' without a solution' + (noAnswer ? ', ' + noAnswer + ' without an answer' : '') +
+          '. The AI works each one out without looking at the answer, then compares. About ' + aiUsesFor(targets.map(aiItem)) + ' AI use' + (aiUsesFor(targets.map(aiItem)) === 1 ? '' : 's') + '.</span></div>' : '') + '</div>';
+    }
 
-    function render() {
-      const box = $('#impPreview');
-      if (!box) return;
-      if (!st.parsed) { box.innerHTML = ''; return; }
+    function headHTML() {
       const items = st.parsed;
       const ready = items.filter(isReady);
       const noChapter = items.filter((it) => it.include && !it.dup && !it.chapter_id).length;
       const noAnswer = items.filter((it) => it.include && !it.dup && !it.answer).length;
       const dups = items.filter((it) => it.dup).length;
-      const chOpts = groupedChapterOptions('');
-      box.innerHTML =
-        '<div class="draft-head"><div><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
+      return '<div class="draft-head"><div><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
         '<p class="muted small" style="margin-top:4px">' + ready.length + ' ready to save' + (noChapter ? ' · ' + noChapter + ' need a chapter' : '') + (noAnswer ? ' · ' + noAnswer + ' need the correct option' : '') +
         (dups ? ' · ' + dups + ' already in the bank' : '') + '</p></div>' +
-        '<button class="btn primary" data-act="save-imp"' + (ready.length ? '' : ' disabled') + '>Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' +
-        (h.intro ? h.intro() : '') +
-        (items.length > 1 ? '<div class="panel" style="margin-bottom:12px"><div class="row" style="gap:8px"><b class="small">Set chapter for questions</b>' +
-          '<input type="number" id="rFrom" min="1" style="width:76px" placeholder="from" aria-label="From question number"><span class="small">to</span><input type="number" id="rTo" min="1" style="width:76px" placeholder="to" aria-label="To question number">' +
-          '<select id="rChapter" style="max-width:280px" aria-label="Chapter"><option value="">Choose chapter…</option>' + chOpts + '</select><button class="btn sm" data-act="apply-range">Apply</button></div></div>' : '') +
-        items.map((it, i) => '<article class="qcard' + (it.dup ? ' is-dup' : '') + '"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + '</span>' : '') +
-          (it.pages && it.pages.length ? '<span class="chip">' + esc(it.pages.join(' + ')) + '</span>' : '') +
-          (it.dup ? '<span class="chip">Already in the bank</span>' : warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : '<span class="chip easy">Looks right</span>') +
-          '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + (it.dup ? ' disabled' : '') + '> Include</label></div>' +
-          questionHTML({ body: it.body, options: it.options.map((t, k) => ({ text: t, image: optImage(it, k) ? optImage(it, k).url : null })), answer: it.answer, images: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.url) }, { showAnswer: true }) +
-          ((it.figures || []).length ? '<div class="fig-pick"><span class="small muted">Diagrams found. Choose where each one goes:</span><div class="fig-row">' + it.figures.map((f, k) =>
-            '<figure class="fig-item' + (f.assign === 'none' ? ' unused' : '') + '"><img src="' + esc(f.url) + '" alt="Diagram ' + (k + 1) + ' from Q' + it.num + '"><select data-fig="' + i + ':' + k + '" aria-label="Where diagram ' + (k + 1) + ' goes">' +
-            [['q', 'In the question'], [1, 'Option 1'], [2, 'Option 2'], [3, 'Option 3'], [4, 'Option 4'], ['none', 'Don’t use']].map(([v, l]) => '<option value="' + v + '"' + (String(f.assign) === String(v) ? ' selected' : '') + '>' + l + '</option>').join('') +
-            '</select>' + (h.recrop && f.box ? '<span class="fig-adj"><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':-1" aria-label="Crop diagram ' + (k + 1) + ' tighter"' + ((f.pad || 0) <= -1 ? ' disabled' : '') + '>Tighter</button><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':1" aria-label="Crop diagram ' + (k + 1) + ' wider"' + ((f.pad || 0) >= 4 ? ' disabled' : '') + '>Wider</button></span>' : '') +
-            '</figure>').join('') + '</div></div>' : '') +
-          '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
-          '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select>' +
-          (it.difficulty ? '<select data-idiff="' + i + '" aria-label="Difficulty for Q' + it.num + '" style="max-width:120px">' + mapOptions(DIFFS, it.difficulty) + '</select>' : '') + '</div>' +
-          (it.solution ? '<details><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') +
-          (h.compare && it.scan ? '<details class="scan-cmp" data-cmp="' + i + '"><summary>Compare with the scan</summary><div class="scan-body muted small">Loading…</div></details>' : '') +
-          '<details class="fix"' + (it.editing ? ' open' : '') + '><summary data-fixopen="' + i + '">Fix the text</summary><div class="fix-body">' +
-          '<label class="field">Question<textarea class="q-input" rows="3" data-fix="' + i + ':body">' + esc(it.body) + '</textarea></label>' +
-          '<div class="fix-opts">' + it.options.map((o, k) => '<label class="field">Option ' + (k + 1) + '<input type="text" data-fix="' + i + ':' + k + '" value="' + esc(o) + '"' + (optImage(it, k) ? ' placeholder="(picture)"' : '') + '></label>').join('') + '</div>' +
-          '<label class="field">Solution<textarea class="q-input" rows="2" data-fix="' + i + ':solution">' + esc(it.solution || '') + '</textarea></label>' +
-          '<button class="btn sm" data-act="fix-done" data-i="' + i + '">Done</button></div></details>' +
-          '</article>').join('') +
-        (ready.length ? '<div class="form-actions"><button class="btn primary" data-act="save-imp">Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>' : '') +
-        '<p class="muted small" style="margin-top:12px">' + (h.footnote || 'Diagrams and graphs are cut out of the PDF automatically. If one is missing or badly cut, save the question anyway, then open it from the bank and paste a screenshot of the diagram.') + '</p>';
-      $$('#impPreview input[data-inc]').forEach((c) => c.addEventListener('change', () => { const it = st.parsed[Number(c.dataset.inc)]; it.include = c.checked; touch(it); render(); }));
-      $$('#impPreview input[data-ans]').forEach((r) => r.addEventListener('change', () => { const it = st.parsed[Number(r.dataset.ans)]; it.answer = Number(r.value); it.answerByUser = true; it.warnings = (it.warnings || []).filter((w) => w !== 'No answer found' && !/disagree/.test(w)); touch(it); rerender(); }));
-      $$('#impPreview select[data-ich]').forEach((sel) => sel.addEventListener('change', () => { const it = st.parsed[Number(sel.dataset.ich)]; it.chapter_id = Number(sel.value) || ''; touch(it); rerender(); }));
-      $$('#impPreview select[data-idiff]').forEach((sel) => sel.addEventListener('change', () => { const it = st.parsed[Number(sel.dataset.idiff)]; it.difficulty = sel.value; touch(it); }));
-      $$('#impPreview [data-fix]').forEach((el) => {
+        '<button class="btn primary" data-act="save-imp"' + (ready.length && !solving() ? '' : ' disabled') + '>Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>';
+    }
+    function footHTML() {
+      const n = st.parsed.filter(isReady).length;
+      return n ? '<div class="form-actions"><button class="btn primary" data-act="save-imp"' + (solving() ? ' disabled' : '') + '>Save ' + n + ' question' + (n === 1 ? '' : 's') + '</button></div>' : '';
+    }
+    function cardHTML(it, i, chOpts) {
+      return '<article class="qcard' + (it.dup ? ' is-dup' : '') + '" data-card="' + i + '"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + '</span>' : '') +
+        (it.pages && it.pages.length ? '<span class="chip">' + esc(it.pages.join(' + ')) + '</span>' : '') +
+        (it.dup ? '<span class="chip">Already in the bank</span>' : warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : it.ai_flag ? '' : '<span class="chip easy">Looks right</span>') +
+        (it.dup ? '' : aiChipsHTML(it) + (it.aiState === 'working' ? '<span class="chip ai">AI working…</span>' : it.aiState === 'queued' ? '<span class="chip">Waiting for the AI</span>' : '')) +
+        '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + (it.dup ? ' disabled' : '') + '> Include</label></div>' +
+        questionHTML({ body: it.body, options: it.options.map((t, k) => ({ text: t, image: optImage(it, k) ? optImage(it, k).url : null })), answer: it.answer, images: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.url) }, { showAnswer: true }) +
+        ((it.figures || []).length ? '<div class="fig-pick"><span class="small muted">Diagrams found. Choose where each one goes:</span><div class="fig-row">' + it.figures.map((f, k) =>
+          '<figure class="fig-item' + (f.assign === 'none' ? ' unused' : '') + '"><img src="' + esc(f.url) + '" alt="Diagram ' + (k + 1) + ' from Q' + it.num + '"><select data-fig="' + i + ':' + k + '" aria-label="Where diagram ' + (k + 1) + ' goes">' +
+          [['q', 'In the question'], [1, 'Option 1'], [2, 'Option 2'], [3, 'Option 3'], [4, 'Option 4'], ['none', 'Don’t use']].map(([v, l]) => '<option value="' + v + '"' + (String(f.assign) === String(v) ? ' selected' : '') + '>' + l + '</option>').join('') +
+          '</select>' + (h.recrop && f.box ? '<span class="fig-adj"><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':-1" aria-label="Crop diagram ' + (k + 1) + ' tighter"' + ((f.pad || 0) <= -1 ? ' disabled' : '') + '>Tighter</button><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':1" aria-label="Crop diagram ' + (k + 1) + ' wider"' + ((f.pad || 0) >= 4 ? ' disabled' : '') + '>Wider</button></span>' : '') +
+          '</figure>').join('') + '</div></div>' : '') +
+        (it.dup ? '' : aiFlagHTML(it, i)) +
+        '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
+        '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select>' +
+        (it.difficulty ? '<select data-idiff="' + i + '" aria-label="Difficulty for Q' + it.num + '" style="max-width:120px">' + mapOptions(DIFFS, it.difficulty) + '</select>' : '') + '</div>' +
+        (it.solution ? '<details' + (it.solOpen ? ' open' : '') + ' data-solopen="' + i + '"><summary>Solution</summary><div class="rich">' + rich(it.solution) + '</div></details>' : '') +
+        (h.compare && it.scan ? '<details class="scan-cmp" data-cmp="' + i + '"><summary>Compare with the scan</summary><div class="scan-body muted small">Loading…</div></details>' : '') +
+        '<details class="fix"' + (it.editing ? ' open' : '') + '><summary data-fixopen="' + i + '">Fix the text</summary><div class="fix-body">' +
+        '<label class="field">Question<textarea class="q-input" rows="3" data-fix="' + i + ':body">' + esc(it.body) + '</textarea></label>' +
+        '<div class="fix-opts">' + it.options.map((o, k) => '<label class="field">Option ' + (k + 1) + '<input type="text" data-fix="' + i + ':' + k + '" value="' + esc(o) + '"' + (optImage(it, k) ? ' placeholder="(picture)"' : '') + '></label>').join('') + '</div>' +
+        '<label class="field">Solution<textarea class="q-input" rows="2" data-fix="' + i + ':solution">' + esc(it.solution || '') + '</textarea></label>' +
+        '<button class="btn sm" data-act="fix-done" data-i="' + i + '">Done</button></div></details>' +
+        '</article>';
+    }
+    // Listeners for the controls inside root (the whole review, or one card drawn again).
+    function bind(root) {
+      $$('input[data-inc]', root).forEach((c) => c.addEventListener('change', () => { const it = st.parsed[Number(c.dataset.inc)]; it.include = c.checked; touch(it); rerender(); }));
+      $$('input[data-ans]', root).forEach((r) => r.addEventListener('change', () => {
+        const it = st.parsed[Number(r.dataset.ans)];
+        const msg = aiAnswerChanged(it, Number(r.value));
+        it.answer = Number(r.value); it.answerByUser = true; it.warnings = (it.warnings || []).filter((w) => w !== 'No answer found' && !/disagree/.test(w)); touch(it); rerender();
+        if (msg) toast(msg);
+      }));
+      $$('select[data-ich]', root).forEach((sel) => sel.addEventListener('change', () => { const it = st.parsed[Number(sel.dataset.ich)]; it.chapter_id = Number(sel.value) || ''; touch(it); rerender(); }));
+      $$('select[data-idiff]', root).forEach((sel) => sel.addEventListener('change', () => { const it = st.parsed[Number(sel.dataset.idiff)]; it.difficulty = sel.value; touch(it); }));
+      $$('[data-fix]', root).forEach((el) => {
         const [i, key] = el.dataset.fix.split(':');
         const it = st.parsed[Number(i)];
         el.addEventListener('input', () => {
           it.edited = true; touch(it);
-          if (key === 'body') it.body = el.value; else if (key === 'solution') it.solution = el.value; else it.options[Number(key)] = el.value;
+          if (key === 'body') it.body = el.value; else if (key === 'solution') { it.solution = el.value; it.ai_solution = false; it.solFor = null; } else it.options[Number(key)] = el.value;
         });
       });
-      $$('#impPreview summary[data-fixopen]').forEach((sm) => sm.addEventListener('click', () => { const it = st.parsed[Number(sm.dataset.fixopen)]; it.editing = !sm.parentNode.open; }));
-      $$('#impPreview select[data-fig]').forEach((sel) => sel.addEventListener('change', () => {
+      $$('summary[data-fixopen]', root).forEach((sm) => sm.addEventListener('click', () => { const it = st.parsed[Number(sm.dataset.fixopen)]; it.editing = !sm.parentNode.open; }));
+      $$('details[data-solopen]', root).forEach((d) => d.addEventListener('toggle', () => { const it = st.parsed[Number(d.dataset.solopen)]; if (it) it.solOpen = d.open; }));
+      $$('select[data-fig]', root).forEach((sel) => sel.addEventListener('change', () => {
         const [i, k] = sel.dataset.fig.split(':').map(Number);
         const it = st.parsed[i];
         const v = /^\d$/.test(sel.value) ? Number(sel.value) : sel.value;
@@ -1311,11 +1804,106 @@
         touch(it);
         rerender();
       }));
-      $$('#impPreview details[data-cmp]').forEach((d) => d.addEventListener('toggle', () => { if (d.open && !d.dataset.done) { d.dataset.done = '1'; h.compare(st.parsed[Number(d.dataset.cmp)], $('.scan-body', d)); } }));
-      hydrateImages(box);
-      if (h.afterRender) h.afterRender(box);
+      $$('details[data-cmp]', root).forEach((d) => d.addEventListener('toggle', () => { if (d.open && !d.dataset.done) { d.dataset.done = '1'; h.compare(st.parsed[Number(d.dataset.cmp)], $('.scan-body', d)); } }));
     }
 
+    function render() {
+      const box = $('#impPreview');
+      if (!box) return;
+      if (!st.parsed) { box.innerHTML = ''; return; }
+      const items = st.parsed;
+      const chOpts = groupedChapterOptions('');
+      box.innerHTML = headHTML() +
+        (h.intro ? h.intro() : '') + '<div id="aiSolveBox">' + aiSolveHTML() + '</div>' +
+        (items.length > 1 ? '<div class="panel" style="margin-bottom:12px"><div class="row" style="gap:8px"><b class="small">Set chapter for questions</b>' +
+          '<input type="number" id="rFrom" min="1" style="width:76px" placeholder="from" aria-label="From question number"><span class="small">to</span><input type="number" id="rTo" min="1" style="width:76px" placeholder="to" aria-label="To question number">' +
+          '<select id="rChapter" style="max-width:280px" aria-label="Chapter"><option value="">Choose chapter…</option>' + chOpts + '</select><button class="btn sm" data-act="apply-range">Apply</button></div></div>' : '') +
+        items.map((it, i) => cardHTML(it, i, chOpts)).join('') +
+        '<div id="impFoot">' + footHTML() + '</div>' +
+        '<p class="muted small" style="margin-top:12px">' + (h.footnote || 'Diagrams and graphs are cut out of the PDF automatically. If one is missing or badly cut, save the question anyway, then open it from the bank and paste a screenshot of the diagram.') + '</p>';
+      bind(box);
+      hydrateImages(box);
+      if (h.afterRender) h.afterRender(box);
+      dirty.clear();
+    }
+
+    // While the AI works, only the progress, the counts and the questions it has changed are drawn again,
+    // and never the question the mentor is typing in.
+    const dirty = new Set();
+    let refreshTimer = null;
+    function refreshSoon() { if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = null; refresh(); }, 400); }
+    function refresh() {
+      if (stale(myToken)) return;
+      const box = $('#impPreview');
+      if (!box || !st.parsed) return;
+      const head = $('.draft-head', box), aiBox = $('#aiSolveBox', box), foot = $('#impFoot', box);
+      if (!head || !aiBox || !foot) { rerender(); return; }
+      head.outerHTML = headHTML();
+      aiBox.innerHTML = aiSolveHTML();
+      foot.innerHTML = footHTML();
+      const chOpts = groupedChapterOptions('');
+      for (const it of [...dirty]) {
+        const i = st.parsed.indexOf(it);
+        const el = i < 0 ? null : $('[data-card="' + i + '"]', box);
+        if (!el) { dirty.delete(it); continue; }
+        if (el.contains(document.activeElement) && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) continue; // drawn once the mentor moves on
+        const tmp = document.createElement('div');
+        tmp.innerHTML = cardHTML(it, i, chOpts);
+        const card = tmp.firstElementChild;
+        el.replaceWith(card);
+        bind(card);
+        hydrateImages(card);
+        dirty.delete(it);
+      }
+    }
+    // A card left out because the mentor was typing in it is drawn when they leave it.
+    { const pv = $('#impPreview'); if (pv) pv.addEventListener('focusout', () => { if (dirty.size && !stale(myToken)) setTimeout(refreshSoon, 0); }); }
+
+    S.actions['ai-solve'] = () => {
+      if (solving()) return;
+      if (st.running) { toast('Wait until the conversion finishes.', 'bad'); return; }
+      const targets = solveTargets();
+      if (!targets.length) return;
+      targets.forEach(touch);
+      const list = targets.map(aiItem);
+      st.solve = aiSolveJob(list, {
+        onResult: (x, res) => applyAi(x.it, res, x.key),
+        onChange: () => {
+          const changed = list.filter((x) => x.it.aiState !== x.aiState || x.it.aiDirty);
+          changed.forEach((x) => { x.it.aiState = x.aiState; x.it.aiDirty = false; });
+          if (st.solveUi) st.solveUi(changed.map((x) => x.it));
+        },
+      });
+      list.forEach((x) => { x.it.aiState = 'queued'; });
+      st.solveUi(targets);
+    };
+    S.actions['ai-solve-stop'] = () => { if (st.solve) st.solve.stop(); };
+    S.actions['ai-use'] = (b) => {
+      const it = st.parsed[Number(b.dataset.ref)], f = it && it.ai_flag;
+      if (!f) return;
+      Object.assign(it, { answer: f.ai, answerByUser: true, ai_answer: false, ai_flag: null });
+      if (!hasSolution(it) || it.ai_solution) Object.assign(it, { solution: f.solution || '', solFor: f.ai, ai_solution: !!f.solution });
+      touch(it); rerender();
+    };
+    S.actions['ai-keep'] = async (b) => {
+      const it = st.parsed[Number(b.dataset.ref)], f = it && it.ai_flag;
+      if (!f) return;
+      Object.assign(it, { ai_flag: null, ai_answer: false, answerByUser: true });
+      touch(it); rerender();
+      if (hasSolution(it) || solving()) return;
+      // A solution for the answer the mentor kept.
+      toast('Asking the AI for a solution for (' + it.answer + ')…');
+      const job = aiSolveJob([aiItem(it)], { mode: 'explain', onResult: (x, res) => { applyAi(x.it, res, x.key); if (res.kind === 'not_explained') toast('The AI could not work its way to (' + x.key + ')' + (res.note ? ': ' + res.note : '.') + ' Type the solution under “Fix the text”.', 'bad'); } });
+      await job.promise;
+      if (job.halt || job.failed.length) toast(job.halt ? job.halt.message : 'The AI could not write a solution: ' + job.failed[0].message, 'bad');
+      if (st.solveUi) st.solveUi([it]);
+    };
+    S.actions['ai-ok'] = (b) => {
+      const it = st.parsed[Number(b.dataset.ref)];
+      if (!it) return;
+      if (it.ai_flag && it.ai_flag.kind === 'unsure') it.ai_answer = false;
+      it.ai_flag = null; touch(it); rerender();
+    };
     S.actions['fix-done'] = (btn) => {
       const it = st.parsed[Number(btn.dataset.i)];
       it.editing = false;
@@ -1339,7 +1927,7 @@
     };
     S.actions['save-imp'] = async (b) => {
       let ready = st.parsed.filter(isReady);
-      if (!ready.length) return;
+      if (!ready.length || solving()) return;
       busy(b, true, 'Saving…');
       try {
         if (h.noteFor) {
@@ -1362,6 +1950,7 @@
             chapter_id: it.chapter_id, qtype: it.qtype || st.qtype, difficulty: it.difficulty || st.difficulty, body: it.body,
             options: it.options.map((t, k) => { const f = figs.find((x) => x.assign === k + 1); return { text: t.trim(), image: f ? f.path : null }; }),
             answer: it.answer, solution: it.solution || null,
+            ai_answer: !!it.ai_answer, ai_solution: !!(it.ai_solution && hasSolution(it)), ai_flag: it.ai_flag || null,
             images: figs.filter((f) => f.assign === 'q').map((f) => f.path), source_type: st.source_type,
             source_note: h.noteFor ? it.note : (st.source_note.trim() || null),
           };
@@ -1585,6 +2174,7 @@
     };
     S.actions['to-ai'] = () => { S.aiPending = st.lastFile ? [st.lastFile] : null; location.hash = '#/import/ai'; };
     review.render();
+    if (!aiReady()) aiStatus().then(() => { if (aiReady() && st.solveUi) st.solveUi(); });
   }
 
   /* ================= Convert scanned papers with AI ================= */
@@ -1827,10 +2417,16 @@
     if (!fromPages) st.units.forEach((u) => { if (u.status === 'done' && u.result) (u.result.answer_key || []).forEach((a) => { k[a.number] = a.answer; }); });
     return Object.assign(k, L.parseAnswerKey(st.keyText));
   }
+  // The answer key fills in a question's answer. If the AI had worked on the question, its work follows the key.
+  function setKeyAnswer(it, a) {
+    if (it.answer === a) return;
+    if (it.ai_answer || it.ai_solution || it.ai_flag) aiAnswerChanged(it, a);
+    it.answer = a;
+  }
   function applyKey(st) {
     const key = aiKey(st);
     let n = 0;
-    (st.parsed || []).forEach((it) => { if (!it.answerByUser && key[it.num] && it.answer !== key[it.num]) { it.answer = key[it.num]; it.warnings = (it.warnings || []).filter((w) => w !== 'No answer found'); n++; } });
+    (st.parsed || []).forEach((it) => { if (!it.answerByUser && key[it.num] && it.answer !== key[it.num]) { setKeyAnswer(it, key[it.num]); it.warnings = (it.warnings || []).filter((w) => w !== 'No answer found'); n++; } });
     return n;
   }
 
@@ -1874,7 +2470,7 @@
       });
     }
     // Answers from the key fill in every question whose answer the mentor has not picked by hand.
-    fresh.forEach((it) => { if (!it.answerByUser && key[it.num]) it.answer = key[it.num]; });
+    fresh.forEach((it) => { if (!it.answerByUser && key[it.num]) setKeyAnswer(it, key[it.num]); });
     // Pictures of questions that are no longer in the list are let go.
     const keep = new Set(fresh);
     (st.parsed || []).filter((it) => !keep.has(it)).forEach((it) => dropItemFigures([it]));
@@ -1945,7 +2541,7 @@
       },
       intro: () => {
         const missing = (st.parsed || []).filter((it) => !it.dup && it.include && !it.answer).length;
-        return (missing ? '<div class="notice warn ai-keybox"><b>' + missing + ' question' + (missing === 1 ? ' has' : 's have') + ' no answer yet.</b> Add the answer key and they fill in. Answers you pick by hand are kept.' +
+        return (missing ? '<div class="notice warn ai-keybox"><b>' + missing + ' question' + (missing === 1 ? ' has' : 's have') + ' no answer yet.</b> Add the answer key and they fill in, or let the AI work them out below. Answers you pick by hand are kept.' +
           '<label class="field" style="margin-top:10px">Type or paste the key<textarea id="aiKeyText2" rows="2" placeholder="1-3, 2-1, 3-4 …   or   1 (c) 2 (a) …">' + esc(st.keyText) + '</textarea></label>' +
           '<div class="row" style="gap:10px;margin-top:8px;align-items:center"><button class="btn primary sm" type="button" data-act="ai-key-fill">Fill in answers</button>' +
           '<label class="btn sm"><input type="file" id="aiKey2" accept="application/pdf,.pdf,image/*" multiple hidden>Add key PDF or photo</label><span class="muted small" id="aiKeyInfo2"></span></div></div>' : '') +
@@ -1980,14 +2576,14 @@
 
     const setState = (html) => { const el = $('#aiState'); if (el) el.innerHTML = html; };
     async function loadStatus() {
-      try { st.status = await Api.ai('status'); }
-      catch (e) { st.status = { error: e.message }; }
+      st.status = await aiStatus(true);
       if (stale(token)) return;
+      review.render();
       const s = st.status;
       if (s.error) setState('<div class="notice warn" style="margin-bottom:16px">Could not check whether AI conversion is ready: ' + esc(s.error) + '</div>');
       else if (!s.configured) setState('<div class="notice warn" style="margin-bottom:16px">' + (isAdmin() ? 'AI conversion needs a free Gemini key first. <a href="#/admin" data-act="ai-admin">Set it up in Admin → AI conversion</a>.' : 'AI conversion is not set up yet. Ask the admin to add a Gemini key.') + '</div>');
       else if (!s.allowed) setState('<div class="notice warn" style="margin-bottom:16px">The admin has not switched AI conversion on for mentors.</div>');
-      else setState(s.daily_pages ? '<p class="muted small" style="margin:-6px 0 14px">You have converted ' + s.used_today + ' of ' + s.daily_pages + ' pages allowed today.</p>' : '');
+      else setState(s.daily_pages ? '<p class="muted small" style="margin:-6px 0 14px">You have used the AI ' + s.used_today + ' of the ' + s.daily_pages + ' times allowed today.</p>' : '');
       renderGo();
     }
     S.actions['ai-admin'] = () => { S.adminTab = 'ai'; location.hash = '#/admin'; };
@@ -2281,7 +2877,7 @@
       st.keyText = e.target.value;
       if (!st.parsed) return;
       const typed = L.parseAnswerKey(st.keyText);
-      st.parsed.forEach((it) => { if (typed[it.num] && !it.answerByUser) it.answer = typed[it.num]; });
+      st.parsed.forEach((it) => { if (typed[it.num] && !it.answerByUser) setKeyAnswer(it, typed[it.num]); });
       review.render();
     }, 500));
     $('#aiSetup').addEventListener('toggle', renderSum);
@@ -2633,7 +3229,7 @@
       [status, usage] = await Promise.all([Api.ai('status'), Api.ai('usage').then((r) => r.rows || []).catch(() => [])]);
     } catch (e) { status = { error: e.message }; }
     if (stale(token)) return;
-    const a = Object.assign({ mentors_enabled: true, daily_pages: 20 }, (S.settings && S.settings.ai) || {});
+    const a = Object.assign({ mentors_enabled: true, daily_pages: 40 }, (S.settings && S.settings.ai) || {});
     const models = (Array.isArray(a.models) && a.models.length ? a.models : (status && status.models) || AI_DEFAULT_MODELS);
     const keyLine = status.error ? '<div class="notice warn">Could not check the AI set-up: ' + esc(status.error) + '</div>'
       : status.configured ? '<div class="notice good"><b>Gemini key saved</b> (ends ' + esc(String(status.key_hint || '').replace('…', '')) + (status.key_saved_at ? ', added ' + esc(fmtDate(status.key_saved_at)) : '') + '). AI conversion is ready.</div>'
@@ -2650,18 +3246,18 @@
       (status.configured ? '<div class="row" style="gap:10px;margin-top:14px"><button class="btn" data-act="ai-test">Check the AI models</button><button class="btn ghost" data-act="ai-rmkey">Remove key</button></div>' : '') +
       '<div id="aiTestOut"></div></div>' +
       '<form class="panel" id="aiSetForm" novalidate><h2 style="margin-bottom:12px">Who can use it</h2>' +
-      '<label class="check"><input type="checkbox" id="aiMentors"' + (a.mentors_enabled !== false ? ' checked' : '') + '> Mentors can convert scanned papers (admins always can)</label>' +
-      '<div class="form-grid" style="margin-top:12px"><label class="field">Pages per mentor per day<span class="hint">0 means no limit. Google’s free plan allows about 20 pages a day for each AI model, roughly 100 a day across all five, shared by everyone. This stops one person using it all.</span><input type="number" id="aiDaily" min="0" max="1000" value="' + esc(a.daily_pages) + '"></label></div>' +
+      '<label class="check"><input type="checkbox" id="aiMentors"' + (a.mentors_enabled !== false ? ' checked' : '') + '> Mentors can use the AI to convert scanned papers and write answers and solutions (admins always can)</label>' +
+      '<div class="form-grid" style="margin-top:12px"><label class="field">AI uses per mentor per day<span class="hint">Each page converted counts as one use, and so does each group of questions solved (6 Physics or Chemistry questions, or 12 Biology ones). 0 means no limit. Google’s free plan allows about 20 uses a day for each AI model, roughly 100 a day across all five, shared by everyone. This stops one person using it all.</span><input type="number" id="aiDaily" min="0" max="1000" value="' + esc(a.daily_pages) + '"></label></div>' +
       '<details style="margin-top:14px"><summary class="small" style="cursor:pointer;font-weight:600;color:var(--accent)">AI models to try, in order</summary>' +
       '<p class="muted small" style="margin:8px 0">The first model that works and still has free allowance today is used, so later ones are back-ups. If Google renames its models, update this list.</p>' +
       '<textarea id="aiModels" rows="5" spellcheck="false">' + esc(models.join('\n')) + '</textarea><div class="row" style="margin-top:8px"><button class="btn ghost sm" type="button" data-act="ai-models-reset">Back to the usual list</button></div></details>' +
       '<div class="form-actions"><button class="btn primary" type="submit" id="aiSetSave">Save</button></div></form>' +
       '<div class="panel"><h2 style="margin-bottom:12px">Use in the last two weeks</h2>' + (usage.length
-        ? '<div class="table-wrap"><table class="data"><thead><tr><th>Day</th><th>Who</th><th class="num">Pages</th><th class="num">Questions</th></tr></thead><tbody>' +
+        ? '<div class="table-wrap"><table class="data"><thead><tr><th>Day</th><th>Who</th><th class="num">AI uses</th><th class="num">Questions</th></tr></thead><tbody>' +
           Object.keys(byDay).sort().reverse().map((d) => byDay[d].map((r, k) => '<tr><td>' + (k ? '' : esc(fmtDate(d))) + '</td><td>' + esc(personName(r.user_id)) + '</td><td class="num">' + r.pages + '</td><td class="num">' + r.questions + '</td></tr>').join('')).join('') + '</tbody></table></div>'
-        : '<p class="muted small">No pages converted yet.</p>') + '</div>' +
+        : '<p class="muted small">The AI has not been used yet.</p>') + '</div>' +
       '<div class="panel"><h2 style="margin-bottom:8px">Privacy and cost</h2><p class="small">On Google’s free plan, Google may use the pages you send to improve its products, and people at Google may read them. That is usually fine for printed question papers, but don’t upload answer sheets or anything with students’ names.</p>' +
-      '<p class="small" style="margin-top:8px">Each page sent counts as one (a scan showing two booklet pages side by side counts as two, because each half is read separately for better accuracy), plus one quick which-way-up check per file. To convert more, or to keep papers out of Google’s training, turn on billing for the key’s project in Google AI Studio. It then costs roughly ₹1 per page, and the daily limits become much larger. Nothing here needs to change.</p></div>' +
+      '<p class="small" style="margin-top:8px">Each page sent counts as one (a scan showing two booklet pages side by side counts as two, because each half is read separately for better accuracy), plus one quick which-way-up check per file. Writing answers and solutions sends the questions with their diagrams in groups, and each group counts as one; only the full Flash models are used for this, because the Lite ones make more mistakes in numericals. To do more, or to keep papers out of Google’s training, turn on billing for the key’s project in Google AI Studio. It then costs roughly ₹1 per page or group of questions, and the daily limits become much larger. Nothing here needs to change.</p></div>' +
       '</div>';
 
     $('#keyForm').addEventListener('submit', async (e) => {
