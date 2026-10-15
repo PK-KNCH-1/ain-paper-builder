@@ -129,7 +129,7 @@
 
     /* ---- Questions ---- */
     async questionMeta() {
-      return fetchAll(() => client().from('questions').select('id, chapter_id, difficulty, archived, is_sample, created_by').order('created_at').order('id'));
+      return fetchAll(() => client().from('questions').select('id, chapter_id, difficulty, archived, is_sample, created_by, duplicate_of').order('created_at').order('id'));
     },
     async listQuestions(f) {
       let q = client().from('questions').select('*', { count: 'exact' });
@@ -197,7 +197,28 @@
       }
       return taken;
     },
-    async setArchived(id, archived) { unwrap(await client().from('questions').update({ archived }).eq('id', id)); },
+    async setArchived(id, archived) { unwrap(await client().from('questions').update(archived ? { archived } : { archived, duplicate_of: null }).eq('id', id)); },
+    /* ---- Duplicates ---- */
+    // Every question's text, to spot ones being imported again.
+    async questionTexts() {
+      return fetchAll(() => client().from('questions').select('id, chapter_id, body, options, answer, images, source_note, archived').order('created_at').order('id'));
+    },
+    // Every question still in use, in full, to look for copies.
+    async activeQuestions() {
+      return fetchAll(() => client().from('questions').select('*').eq('archived', false).order('created_at').order('id'));
+    },
+    // How many papers use each question: Map(id -> count).
+    async paperUse() {
+      const rows = await fetchAll(() => client().from('papers').select('question_ids').order('id'));
+      const use = new Map();
+      rows.forEach((r) => (r.question_ids || []).forEach((id) => use.set(id, (use.get(id) || 0) + 1)));
+      return use;
+    },
+    // A copy that old papers use is archived and points to the kept question; any other copy is deleted.
+    async removeDuplicate(id, keepId, usedInPapers) {
+      if (usedInPapers) unwrap(await client().from('questions').update({ archived: true, duplicate_of: keepId }).eq('id', id));
+      else unwrap(await client().from('questions').delete().eq('id', id));
+    },
     async deleteQuestion(id) { unwrap(await client().from('questions').delete().eq('id', id)); },
     async deleteSamples() { unwrap(await client().from('questions').delete().eq('is_sample', true)); },
 

@@ -132,20 +132,27 @@
   function toMs(d) { return typeof d === 'number' ? d : new Date(d).getTime(); }
 
   // papers: [{created_at, question_ids, responses}] -> Map(questionId -> {seen, last, lastResult, wrong, correct})
-  function buildHistory(papers) {
+  // alias (optional): Map(removed duplicate's id -> id of the question kept in its place). A mentee who saw the
+  // removed copy has seen the kept question too.
+  function buildHistory(papers, alias) {
     const hist = new Map();
     const sorted = (papers || []).slice().sort((a, b) => toMs(a.created_at) - toMs(b.created_at));
+    const note = (id, t, r) => {
+      const h = hist.get(id) || { seen: 0, last: 0, lastResult: null, wrong: 0, correct: 0 };
+      h.seen += 1;
+      h.last = t;
+      h.lastResult = r || null;
+      if (r === 'w') h.wrong += 1;
+      if (r === 'c') h.correct += 1;
+      hist.set(id, h);
+    };
     for (const p of sorted) {
       const t = toMs(p.created_at);
       for (const qid of p.question_ids || []) {
-        const h = hist.get(qid) || { seen: 0, last: 0, lastResult: null, wrong: 0, correct: 0 };
-        h.seen += 1;
-        h.last = t;
         const r = p.responses && p.responses[qid] ? p.responses[qid].r : null;
-        h.lastResult = r || null;
-        if (r === 'w') h.wrong += 1;
-        if (r === 'c') h.correct += 1;
-        hist.set(qid, h);
+        note(qid, t, r);
+        const kept = alias && alias.get(qid);
+        if (kept && kept !== qid) note(kept, t, r);
       }
     }
     return hist;
@@ -163,6 +170,124 @@
     if (!h || !h.seen) return { state: 'new' };
     const due = h.last + gapDaysFor(h, settings) * DAY;
     return { state: toMs(now) >= due ? 'due' : 'resting', due };
+  }
+
+  /* ---------------- Duplicate questions ---------------- */
+  // Two copies of a question count as the same when their words and numbers match, however the maths was typed
+  // ($2\text{ cm}$ and 2 cm are the same) and in whatever order the options are. Near copies (a few words read
+  // differently from a scan) also match, but only when every number is the same, so a question with other data is
+  // never taken for a copy.
+
+  function dupWords(t) {
+    return String(t || '').toLowerCase()
+      .replace(/\\(?:text|mathrm|mathbf|mathit|operatorname|ce|left|right|displaystyle|quad|,|;|!)(?![a-z])/g, ' ')
+      .replace(/\\[dt]frac(?![a-z])/g, ' frac ')
+      .replace(/\\([a-z]+)/g, ' $1 ')
+      .replace(/(\d),(?=\d{3}(\D|$))/g, '$1')
+      .replace(/[^a-z0-9.]+/g, ' ')
+      .split(/\s+/)
+      .map((w) => w.replace(/^\.+|\.+$/g, ''))
+      .filter(Boolean);
+  }
+
+  function dupSignature(q) {
+    const opts = (q.options || []).map((o) => (typeof o === 'string' ? o : (o && o.text) || ''));
+    const body = dupWords(q.body);
+    const optWords = opts.map(dupWords);
+    const optKeys = optWords.map((w) => w.join(' ')).sort();
+    const all = body.concat(...optWords);
+    const grams = new Set();
+    const addGrams = (w) => { for (let i = 0; i + 1 < w.length; i++) grams.add(w[i] + ' ' + w[i + 1]); if (w.length === 1) grams.add(w[0]); };
+    addGrams(body);
+    optWords.forEach(addGrams);
+    return {
+      exact: body.join(' ') + ' || ' + optKeys.join(' | '),
+      nums: all.filter((w) => /^\d/.test(w)).sort().join(' '),
+      grams,
+      size: all.length,
+      empty: !all.length,
+      // Options that are pictures can't be compared, so such questions match only on a long question text.
+      unsure: optWords.some((w) => !w.length) && body.length < 15,
+    };
+  }
+
+  const DUP_NEAR = 0.7;
+  // Share of word pairs the two have in common (0 to 1).
+  function dupSimilarity(a, b) {
+    let n = 0;
+    const [small, big] = a.grams.size <= b.grams.size ? [a.grams, b.grams] : [b.grams, a.grams];
+    small.forEach((g) => { if (big.has(g)) n++; });
+    return n / (a.grams.size + b.grams.size - n || 1);
+  }
+
+  // A searchable list of questions: index.matches(q) gives the ones that are the same as q.
+  function dupIndex(questions) {
+    const sigs = (questions || []).map(dupSignature);
+    const exact = new Map();
+    const post = new Map();
+    sigs.forEach((s, i) => {
+      if (s.empty) return;
+      if (!exact.has(s.exact)) exact.set(s.exact, []);
+      exact.get(s.exact).push(i);
+      s.grams.forEach((g) => { let l = post.get(g); if (!l) post.set(g, (l = [])); l.push(i); });
+    });
+    const cap = Math.max(60, Math.round(sigs.length * 0.03)); // very common word pairs ("which of") say nothing
+    // Indexes of the questions the same as signature s (only those after `after`), each { i, exact }.
+    function similar(s, after) {
+      const out = [];
+      if (s.empty || s.unsure) return out;
+      (exact.get(s.exact) || []).forEach((i) => { if (i > after && !sigs[i].unsure) out.push({ i, exact: true }); });
+      if (s.size < 6) return out; // short questions must match exactly
+      const shared = new Map();
+      for (const g of s.grams) {
+        const l = post.get(g);
+        if (!l || l.length > cap) continue;
+        for (const j of l) if (j > after) shared.set(j, (shared.get(j) || 0) + 1);
+      }
+      for (const [j, n] of shared) {
+        const t = sigs[j];
+        if (n < 2 || t.exact === s.exact || t.nums !== s.nums || t.size < 6 || t.unsure) continue;
+        if (dupSimilarity(s, t) >= DUP_NEAR) out.push({ i: j, exact: false });
+      }
+      return out.sort((a, b) => (b.exact - a.exact) || (a.i - b.i));
+    }
+    return { size: sigs.length, sigs, similar, matches: (q) => similar(dupSignature(q), -1) };
+  }
+
+  // Groups of copies in a list of questions: [{ ids: [...], exact }]. exact: every copy reads the same.
+  // ignore: Set of 'idA|idB' (ids sorted) for pairs a person has said are different questions.
+  function findDuplicates(questions, ignore) {
+    const qs = questions || [];
+    const idx = dupIndex(qs);
+    const parent = qs.map((_, i) => i);
+    const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    const skip = ignore || new Set();
+    idx.sigs.forEach((s, i) => {
+      idx.similar(s, i).forEach(({ i: j }) => {
+        if (skip.has(dupPair(qs[i].id, qs[j].id))) return;
+        parent[find(j)] = find(i);
+      });
+    });
+    const groups = new Map();
+    qs.forEach((q, i) => { const r = find(i); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(i); });
+    return [...groups.values()].filter((g) => g.length > 1).map((g) => ({
+      ids: g.map((i) => qs[i].id),
+      exact: g.every((i) => idx.sigs[i].exact === idx.sigs[g[0]].exact),
+    }));
+  }
+  const dupPair = (a, b) => [String(a), String(b)].sort().join('|');
+
+  // Removed copies kept for old papers point to the question kept in their place: oldId -> keptId (following chains).
+  function duplicateAlias(meta) {
+    const to = new Map();
+    (meta || []).forEach((q) => { if (q.duplicate_of) to.set(q.id, q.duplicate_of); });
+    const alias = new Map();
+    for (const id of to.keys()) {
+      let t = to.get(id);
+      for (let k = 0; k < 10 && to.has(t) && to.get(t) !== id; k++) t = to.get(t);
+      alias.set(id, t);
+    }
+    return alias;
   }
 
   /* ---------------- Paper selection ---------------- */
@@ -877,6 +1002,7 @@
     DEFAULT_SETTINGS, buildHistory, repStatus, gapDaysFor,
     MIXES, mulberry32, shuffle, apportion, buildPaper, nextReplacement,
     scoreResponses, parsePasted, paperCode, parseAnswerKey, mergeAiPages, msToPacificMidnight, tidyFigure,
+    dupWords, dupIndex, findDuplicates, dupPair, duplicateAlias, dupSimilarity, dupSignature,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Logic = api;

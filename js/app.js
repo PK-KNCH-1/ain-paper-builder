@@ -14,7 +14,7 @@
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 13;
+  const APP_BUILD = 14;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -189,7 +189,7 @@
     S.metaAt = Date.now();
     return S.meta;
   }
-  function invalidateMeta() { S.meta = null; }
+  function invalidateMeta() { S.meta = null; bankTexts = null; }
 
   async function loadQuestions(ids) {
     const need = ids.filter((id) => !S.qcache.has(id));
@@ -525,7 +525,7 @@
     const [papers, meta] = await Promise.all([Api.papersForMentee(id), getMeta()]);
     if (stale(token)) return;
     const s = settings();
-    const hist = L.buildHistory(papers);
+    const hist = L.buildHistory(papers, L.duplicateAlias(meta));
     const metaById = new Map(meta.map((q) => [q.id, q]));
     const now = Date.now();
     const agg = new Map();
@@ -612,7 +612,7 @@
     const [papers, meta] = await Promise.all([Api.papersForMentee(menteeId), getMeta()]);
     if (stale(token)) return;
     const s = settings();
-    const hist = L.buildHistory(papers);
+    const hist = L.buildHistory(papers, L.duplicateAlias(meta));
     const now = Date.now();
     const visibleChapters = S.chapters.filter((c) => !c.hidden);
     const st = S.builder[menteeId] || (S.builder[menteeId] = {
@@ -998,7 +998,7 @@
     const pageSize = 25;
     main().innerHTML =
       '<div class="page-head"><div><h1>Question bank</h1><p class="sub">Shared by everyone at ' + esc(orgName()) + '. Archived questions stay on old papers but are left out of new ones.</p></div>' +
-      '<div class="row"><a class="btn" href="#/import">Add from PDF</a><a class="btn primary" href="#/q/new">Add question</a></div></div>' +
+      '<div class="row">' + (isAdmin() ? '<button class="btn" data-act="dup-find">Find duplicates</button>' : '') + '<a class="btn" href="#/import">Add from PDF</a><a class="btn primary" href="#/q/new">Add question</a></div></div>' +
       '<div id="sampleNote"></div>' +
       '<div class="panel" style="margin-bottom:14px"><div class="filters">' +
       '<label class="field">Subject<select id="fSubject"><option value="">All subjects</option>' + subjectOptions(f.subject) + '</select></label>' +
@@ -1011,7 +1011,7 @@
       '</div><div class="row"><label class="check"><input type="checkbox" id="fMine"' + (f.mine ? ' checked' : '') + '> Added by me</label>' +
       '<label class="check"><input type="checkbox" id="fSamples"' + (f.samples ? ' checked' : '') + '> Samples only</label>' +
       '<label class="check"><input type="checkbox" id="fArchived"' + (f.archived ? ' checked' : '') + '> Show archived</label><span class="spacer"></span><span id="bankAiBtn"></span></div></div>' +
-      '<div id="bankAi"></div>' +
+      '<div id="bankAi"></div><div id="bankDup"></div>' +
       '<div id="bankList">' + loadingHTML() + '</div>';
 
     const reload = () => { f.page = 0; loadList(); };
@@ -1056,7 +1056,7 @@
       }
       box.innerHTML = '<p class="muted small" style="margin-bottom:10px">' + res.count + ' question' + (res.count === 1 ? '' : 's') + '</p>' +
         res.rows.map((q) => '<article class="qcard"><div class="meta"><b>' + esc(chapterName(q.chapter_id)) + '</b> · ' + esc((subjectOfChapter(q.chapter_id) || {}).name || '') + ' ' + chipDiff(q.difficulty) +
-          '<span class="chip">' + esc(QTYPES[q.qtype] || q.qtype) + '</span>' + (q.is_sample ? '<span class="chip sample">Sample</span>' : '') + (q.archived ? '<span class="chip">Archived</span>' : '') + aiChipsHTML(q) + (q.topic ? '<span class="muted">· ' + esc(q.topic) + '</span>' : '') + '</div>' +
+          '<span class="chip">' + esc(QTYPES[q.qtype] || q.qtype) + '</span>' + (q.is_sample ? '<span class="chip sample">Sample</span>' : '') + (q.archived ? '<span class="chip">Archived</span>' : '') + (q.duplicate_of ? '<span class="chip">Removed as a copy</span>' : '') + aiChipsHTML(q) + (q.topic ? '<span class="muted">· ' + esc(q.topic) + '</span>' : '') + '</div>' +
           questionHTML(q, { showAnswer: true }) +
           (q.solution ? '<details><summary>Solution</summary><div class="rich" style="margin-top:6px">' + rich(q.solution) + '</div></details>' : '') +
           aiFlagHTML(q, canEdit(q) ? q.id : null) +
@@ -1185,10 +1185,126 @@
       b.job.promise.then(() => { const u = ui(); if (u) { u.render(); u.reload(); } });
       renderBulk();
     };
+    /* ---- Duplicates in the bank (admin) ---- */
+    // S.dupScan: { groups: [{ key, ids, exact, keep, done }], byId, use (papers per question), total, shown, removed, archived }
+    const DUP_PAGE = 20;
+    const usedIn = (id) => (S.dupScan && S.dupScan.use.get(id)) || 0;
+    // The correct option, by its words when it has any (copies may list the options in another order).
+    const rightOption = (q) => { const o = (q.options || [])[q.answer - 1]; const w = o && L.dupWords(o.text).join(' '); return w || '#' + q.answer; };
+    const answersDiffer = (g) => new Set(g.ids.map((id) => rightOption(S.dupScan.byId.get(id)))).size > 1;
+    function dupCopyHTML(g, q) {
+      const n = usedIn(q.id);
+      const meta = [esc(chapterName(q.chapter_id)), q.source_note ? esc(q.source_note) : esc(SOURCES[q.source_type] || q.source_type), 'added by ' + esc(q.created_by ? personName(q.created_by) : 'setup') + ', ' + esc(fmtDate(q.created_at)),
+        n ? 'in ' + n + ' paper' + (n === 1 ? '' : 's') : 'not in any paper', String(q.solution || '').trim() ? 'has a solution' : 'no solution'];
+      return '<label class="dup-copy"><input type="radio" name="dk-' + g.key + '" value="' + q.id + '" data-dupkeep="' + g.key + '"' + (g.keep === q.id ? ' checked' : '') + '>' +
+        '<div><div class="dup-keep">Keep this one</div>' + questionHTML(q, { showAnswer: true }) + '<div class="dup-meta">' + meta.join(' · ') + '</div></div></label>';
+    }
+    function renderDup() {
+      const box = $('#bankDup');
+      if (!box || stale(token)) return;
+      const scan = S.dupScan;
+      if (!scan) { box.innerHTML = ''; return; }
+      const open = scan.groups.filter((g) => !g.done);
+      const extra = open.reduce((n, g) => n + g.ids.length - 1, 0);
+      const easy = open.filter((g) => g.exact && !answersDiffer(g));
+      const done = scan.removed ? '<p class="small" style="margin-top:6px">' + scan.removed + ' cop' + (scan.removed === 1 ? 'y' : 'ies') + ' removed' + (scan.archived ? ' (' + scan.archived + ' used in old papers ' + (scan.archived === 1 ? 'was' : 'were') + ' archived instead of deleted)' : '') + '.</p>' : '';
+      if (!open.length) {
+        box.innerHTML = '<div class="panel dup-group"><b>' + (scan.removed ? 'All done.' : 'No duplicates found among the ' + scan.total + ' questions in use.') + '</b>' + done +
+          '<div class="row" style="margin-top:10px"><button class="btn ghost sm" data-act="dup-close">Close</button></div></div>';
+        return;
+      }
+      box.innerHTML = '<div class="panel dup-group"><div class="row" style="align-items:center"><b>' + open.length + ' question' + (open.length === 1 ? '' : 's') + ' saved more than once: ' + extra + ' extra cop' + (extra === 1 ? 'y' : 'ies') + '</b><span class="spacer"></span><button class="btn ghost sm" data-act="dup-close">Close</button></div>' + done +
+        '<p class="muted small" style="margin-top:6px">For each one, tick the copy to keep. The others are deleted; a copy that an old paper uses is archived instead, so the paper still shows it and the mentee’s history counts for the kept copy. If the kept copy has no solution, it takes one from a copy with the same answer.</p>' +
+        (easy.length ? '<div class="row" style="margin-top:10px"><button class="btn sm primary" data-act="dup-merge-all">Remove the extra copies of the ' + easy.length + ' that read exactly the same</button></div>' : '') + '</div>' +
+        open.slice(0, scan.shown).map((g) => {
+          const qs = g.ids.map((id) => scan.byId.get(id));
+          return '<div class="panel dup-group" data-dupg="' + g.key + '"><div class="row" style="align-items:center;gap:8px"><b>' + (g.exact ? 'Same question' : 'Nearly the same question') + ', ' + qs.length + ' copies</b>' +
+            (answersDiffer(g) ? '<span class="chip hard">The copies have different answers</span>' : '') + '</div>' +
+            '<div class="dup-copies' + (qs.length === 2 ? ' two' : '') + '">' + qs.map((q) => dupCopyHTML(g, q)).join('') + '</div>' +
+            '<div class="row" style="margin-top:10px"><button class="btn sm" data-act="dup-merge" data-g="' + g.key + '">Keep the ticked one, remove ' + (qs.length === 2 ? 'the other' : 'the other ' + (qs.length - 1)) + '</button>' +
+            '<button class="btn ghost sm" data-act="dup-differ" data-g="' + g.key + '">These are different questions</button></div></div>';
+        }).join('') +
+        (open.length > scan.shown ? '<div class="row"><button class="btn" data-act="dup-more">Show more (' + (open.length - scan.shown) + ' left)</button></div>' : '');
+      hydrateImages(box);
+    }
+    // Keeps g.keep and removes the other copies. Returns how many were removed.
+    async function mergeGroup(g) {
+      const scan = S.dupScan;
+      const keep = scan.byId.get(g.keep);
+      const others = g.ids.filter((id) => id !== g.keep).map((id) => scan.byId.get(id));
+      if (!String(keep.solution || '').trim()) {
+        // A solution from a copy with the same answer fills the gap (one written by a person first).
+        const src = others.filter((q) => String(q.solution || '').trim() && q.answer === keep.answer && rightOption(q) === rightOption(keep)).sort((a, b) => (a.ai_solution ? 1 : 0) - (b.ai_solution ? 1 : 0))[0];
+        if (src) scan.byId.set(keep.id, await Api.saveAiResult(keep.id, { solution: src.solution, ai_solution: !!src.ai_solution }));
+      }
+      for (const q of others) {
+        const used = usedIn(q.id) > 0;
+        await Api.removeDuplicate(q.id, keep.id, used);
+        scan.removed++;
+        if (used) scan.archived++;
+      }
+      g.done = true;
+      return others.length;
+    }
+    const afterDup = () => { invalidateMeta(); renderDup(); loadList(); };
+    S.actions['dup-find'] = async (b) => {
+      busy(b, true, 'Looking…');
+      try {
+        const [rows, use] = await Promise.all([Api.activeQuestions(), Api.paperUse()]);
+        const ignore = new Set((S.settings && S.settings.dup_ignored) || []);
+        const byId = new Map(rows.map((q) => [q.id, q]));
+        // The copy to keep by default: used in papers, then has a solution, then checked by a person, then the oldest.
+        const score = (q) => (use.get(q.id) || 0) * 1000 + (String(q.solution || '').trim() ? 100 : 0) + (q.ai_answer ? 0 : 10) + (q.ai_flag ? 0 : 5);
+        const groups = L.findDuplicates(rows, ignore).map((g, k) => {
+          const ids = g.ids.slice().sort((x, y) => (score(byId.get(y)) - score(byId.get(x))) || (new Date(byId.get(x).created_at) - new Date(byId.get(y).created_at)));
+          return { key: 'g' + k, ids, exact: g.exact, keep: ids[0], done: false };
+        }).sort((a, b) => (b.exact - a.exact) || (b.ids.length - a.ids.length));
+        S.dupScan = { groups, byId, use, total: rows.length, shown: DUP_PAGE, removed: 0, archived: 0 };
+        renderDup();
+        $('#bankDup').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (e) { fail(e); } finally { busy(b, false); }
+    };
+    S.actions['dup-close'] = () => { S.dupScan = null; renderDup(); };
+    S.actions['dup-more'] = () => { S.dupScan.shown += DUP_PAGE; renderDup(); };
+    S.actions['dup-merge'] = async (b) => {
+      const g = S.dupScan && S.dupScan.groups.find((x) => x.key === b.dataset.g);
+      if (!g || g.done) return;
+      busy(b, true, 'Removing…');
+      try { const n = await mergeGroup(g); toast(n + ' cop' + (n === 1 ? 'y' : 'ies') + ' removed'); afterDup(); }
+      catch (e) { fail(e); busy(b, false); }
+    };
+    S.actions['dup-merge-all'] = async (b) => {
+      const list = S.dupScan.groups.filter((g) => !g.done && g.exact && !answersDiffer(g));
+      if (!list.length || !confirm('Remove the extra copies of ' + list.length + ' question' + (list.length === 1 ? '' : 's') + ', keeping the ticked copy of each?')) return;
+      busy(b, true);
+      let n = 0;
+      try {
+        for (let k = 0; k < list.length; k++) { b.textContent = 'Removing… ' + (k + 1) + ' of ' + list.length; n += await mergeGroup(list[k]); }
+        toast(n + ' cop' + (n === 1 ? 'y' : 'ies') + ' removed');
+      } catch (e) { fail(e); }
+      afterDup();
+    };
+    S.actions['dup-differ'] = async (b) => {
+      const g = S.dupScan && S.dupScan.groups.find((x) => x.key === b.dataset.g);
+      if (!g) return;
+      busy(b, true);
+      const pairs = new Set((S.settings && S.settings.dup_ignored) || []);
+      g.ids.forEach((x, i) => g.ids.slice(i + 1).forEach((y) => pairs.add(L.dupPair(x, y))));
+      const data = Object.assign({}, S.settings, { dup_ignored: [...pairs] });
+      try { await Api.saveSettings(data); S.settings = data; g.done = true; toast('Marked as different. They won’t be shown together again.'); renderDup(); }
+      catch (e) { fail(e); busy(b, false); }
+    };
+    $('#bankDup').addEventListener('change', (e) => {
+      const r = e.target.closest('input[data-dupkeep]');
+      const g = r && S.dupScan && S.dupScan.groups.find((x) => x.key === r.dataset.dupkeep);
+      if (g) g.keep = r.value;
+    });
+
     if (bs()) bs().ui = { token, render: renderBulk, reload: loadList };
 
     sampleNote().catch(fail);
     renderBulk();
+    renderDup();
     if (!aiReady()) aiStatus().then(renderBulk);
     await loadList();
   }
@@ -1663,6 +1779,58 @@
     return html;
   }
 
+  /* ================= Repeated questions ================= */
+
+  let bankTexts = null;
+  // The text of every question in the bank, for spotting ones imported again (kept for two minutes).
+  async function bankTextIndex() {
+    if (!bankTexts || Date.now() - bankTexts.at > 120000) {
+      const rows = await Api.questionTexts();
+      bankTexts = { at: Date.now(), rows, index: L.dupIndex(rows) };
+    }
+    return bankTexts;
+  }
+
+  // Marks repeats in a list of questions being checked: the same question already in the bank (from any paper, typed
+  // any way), or twice in the list (the fuller copy stays). Repeats are left out of saving; the mentor can tick them back.
+  // A repeat gets it.same = { bank: row, exact } or { num, exact }.
+  async function markRepeats(items) {
+    const list = (items || []).filter((it) => !it.dup);
+    if (!list.length) return;
+    let bank = null;
+    try { bank = await bankTextIndex(); } catch (e) { console.error(e); }
+    const asQ = (it) => ({ body: it.body, options: it.options.map((t) => ({ text: t })) });
+    list.forEach((it) => { if (it.same && !it.sameDecided) { it.same = null; it.include = true; } });
+    const mark = (it, same) => {
+      if (it.sameDecided) return; // the mentor already ticked or unticked it: their choice stands
+      it.same = same;
+      it.include = false;
+    };
+    if (bank) list.forEach((it) => { const m = bank.index.matches(asQ(it))[0]; if (m) mark(it, { bank: bank.rows[m.i], exact: m.exact }); });
+    const idx = L.dupIndex(list.map(asQ));
+    // The later copy is kept only if it is clearly fuller (more options or diagrams, or a much longer text).
+    const parts = (it) => it.options.filter((o) => String(o || '').trim()).length * 10 + (it.figures || []).length;
+    const fuller = (x, y) => (parts(x) !== parts(y) ? parts(x) > parts(y) : x.body.length > y.body.length * 1.2);
+    idx.sigs.forEach((s, i) => idx.similar(s, i).forEach(({ i: j, exact }) => {
+      const a = list[i], b = list[j];
+      if (a.same || b.same) return;
+      const [keep, drop] = fuller(b, a) ? [b, a] : [a, b];
+      mark(drop, { num: keep.num, exact });
+    }));
+  }
+  function sameChipHTML(it) {
+    const s = it.same;
+    if (!s) return '';
+    return '<span class="chip ' + (it.include ? '' : 'hard') + '">' + (s.bank ? (s.exact ? 'Already in the bank' : 'Nearly the same as one in the bank') : (s.exact ? 'Same as Q' + s.num : 'Nearly the same as Q' + s.num)) + (it.include ? ': saving anyway' : ': left out') + '</span>';
+  }
+  function sameCompareHTML(it) {
+    const s = it.same;
+    if (!s || !s.bank) return '';
+    const b = s.bank;
+    return '<details class="same-cmp"><summary>Compare with the one in the bank</summary><div class="same-body">' + questionHTML(b, { showAnswer: true }) +
+      '<p class="muted small" style="margin-top:6px">' + esc(chapterName(b.chapter_id)) + (b.source_note ? ' · ' + esc(b.source_note) : '') + (b.archived ? ' · archived' : '') + '</p></div></details>';
+  }
+
   /* ================= Checking imported questions before saving ================= */
   // Shared by "Add from PDF" and "Convert with AI". st.parsed holds the questions:
   // { num, body, options: [4 strings], answer, solution, warnings, include, chapter_id, figures: [{ blob, url, assign, ... }],
@@ -1740,9 +1908,10 @@
       const noChapter = items.filter((it) => it.include && !it.dup && !it.chapter_id).length;
       const noAnswer = items.filter((it) => it.include && !it.dup && !it.answer).length;
       const dups = items.filter((it) => it.dup).length;
+      const repeats = items.filter((it) => !it.dup && it.same && !it.include).length;
       return '<div class="draft-head"><div><h2>' + items.length + ' question' + (items.length === 1 ? '' : 's') + ' found</h2>' +
         '<p class="muted small" style="margin-top:4px">' + ready.length + ' ready to save' + (noChapter ? ' · ' + noChapter + ' need a chapter' : '') + (noAnswer ? ' · ' + noAnswer + ' need the correct option' : '') +
-        (dups ? ' · ' + dups + ' already in the bank' : '') + '</p></div>' +
+        (dups ? ' · ' + dups + ' already in the bank' : '') + (repeats ? ' · ' + repeats + ' repeat' + (repeats === 1 ? '' : 's') + ' left out' : '') + '</p></div>' +
         '<button class="btn primary" data-act="save-imp"' + (ready.length && !solving() ? '' : ' disabled') + '>Save ' + ready.length + ' question' + (ready.length === 1 ? '' : 's') + '</button></div>';
     }
     function footHTML() {
@@ -1752,8 +1921,8 @@
     function cardHTML(it, i, chOpts) {
       return '<article class="qcard' + (it.dup ? ' is-dup' : '') + '" data-card="' + i + '"><div class="meta"><b>Q' + it.num + '</b>' + (it.subject ? '<span class="chip">' + esc(it.subject) + '</span>' : '') +
         (it.pages && it.pages.length ? '<span class="chip">' + esc(it.pages.join(' + ')) + '</span>' : '') +
-        (it.dup ? '<span class="chip">Already in the bank</span>' : warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : it.ai_flag ? '' : '<span class="chip easy">Looks right</span>') +
-        (it.dup ? '' : aiChipsHTML(it) + (it.aiState === 'working' ? '<span class="chip ai">AI working…</span>' : it.aiState === 'queued' ? '<span class="chip">Waiting for the AI</span>' : '')) +
+        (it.dup ? '<span class="chip">Already in the bank</span>' : warningsOf(it).length ? warningsOf(it).map((w) => '<span class="chip hard">' + esc(w) + '</span>').join('') : it.ai_flag || (it.same && !it.include) ? '' : '<span class="chip easy">Looks right</span>') +
+        (it.dup ? '' : sameChipHTML(it) + aiChipsHTML(it) + (it.aiState === 'working' ? '<span class="chip ai">AI working…</span>' : it.aiState === 'queued' ? '<span class="chip">Waiting for the AI</span>' : '')) +
         '<span class="spacer"></span><label class="check"><input type="checkbox" data-inc="' + i + '"' + (it.include ? ' checked' : '') + (it.dup ? ' disabled' : '') + '> Include</label></div>' +
         questionHTML({ body: it.body, options: it.options.map((t, k) => ({ text: t, image: optImage(it, k) ? optImage(it, k).url : null })), answer: it.answer, images: (it.figures || []).filter((f) => f.assign === 'q').map((f) => f.url) }, { showAnswer: true }) +
         ((it.figures || []).length ? '<div class="fig-pick"><span class="small muted">Diagrams found. Choose where each one goes:</span><div class="fig-row">' + it.figures.map((f, k) =>
@@ -1761,7 +1930,7 @@
           [['q', 'In the question'], [1, 'Option 1'], [2, 'Option 2'], [3, 'Option 3'], [4, 'Option 4'], ['none', 'Don’t use']].map(([v, l]) => '<option value="' + v + '"' + (String(f.assign) === String(v) ? ' selected' : '') + '>' + l + '</option>').join('') +
           '</select>' + (h.recrop && f.box ? '<span class="fig-adj"><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':-1" aria-label="Crop diagram ' + (k + 1) + ' tighter"' + ((f.pad || 0) <= -1 ? ' disabled' : '') + '>Tighter</button><button class="btn ghost sm" data-act="fig-pad" data-f="' + i + ':' + k + ':1" aria-label="Crop diagram ' + (k + 1) + ' wider"' + ((f.pad || 0) >= 4 ? ' disabled' : '') + '>Wider</button></span>' : '') +
           '</figure>').join('') + '</div></div>' : '') +
-        (it.dup ? '' : aiFlagHTML(it, i)) +
+        (it.dup ? '' : sameCompareHTML(it) + aiFlagHTML(it, i)) +
         '<div class="row small" style="margin-top:10px;gap:12px"><span class="row" style="gap:6px"><span class="muted">Correct:</span>' + [1, 2, 3, 4].map((k) => '<label class="check"><input type="radio" name="ia' + i + '" data-ans="' + i + '" value="' + k + '"' + (it.answer === k ? ' checked' : '') + '> ' + k + '</label>').join('') + '</span>' +
         '<select data-ich="' + i + '" aria-label="Chapter for Q' + it.num + '" style="max-width:300px' + (it.chapter_id ? '' : ';border-color:var(--warn)') + '"><option value="">Chapter…</option>' + (it.chapter_id ? groupedChapterOptions(it.chapter_id) : chOpts) + '</select>' +
         (it.difficulty ? '<select data-idiff="' + i + '" aria-label="Difficulty for Q' + it.num + '" style="max-width:120px">' + mapOptions(DIFFS, it.difficulty) + '</select>' : '') + '</div>' +
@@ -1776,7 +1945,7 @@
     }
     // Listeners for the controls inside root (the whole review, or one card drawn again).
     function bind(root) {
-      $$('input[data-inc]', root).forEach((c) => c.addEventListener('change', () => { const it = st.parsed[Number(c.dataset.inc)]; it.include = c.checked; touch(it); rerender(); }));
+      $$('input[data-inc]', root).forEach((c) => c.addEventListener('change', () => { const it = st.parsed[Number(c.dataset.inc)]; it.include = c.checked; if (it.same) it.sameDecided = true; touch(it); rerender(); }));
       $$('input[data-ans]', root).forEach((r) => r.addEventListener('change', () => {
         const it = st.parsed[Number(r.dataset.ans)];
         const msg = aiAnswerChanged(it, Number(r.value));
@@ -1907,7 +2076,7 @@
     S.actions['fix-done'] = (btn) => {
       const it = st.parsed[Number(btn.dataset.i)];
       it.editing = false;
-      if (it.edited && it.body.trim() && it.options.every((o, k) => o.trim() || optImage(it, k)) && !it.dup) it.include = true;
+      if (it.edited && it.body.trim() && it.options.every((o, k) => o.trim() || optImage(it, k)) && !it.dup && !(it.same && !it.sameDecided)) it.include = true;
       rerender();
     };
     S.actions['fig-pad'] = async (btn) => {
@@ -1933,6 +2102,9 @@
         if (h.noteFor) {
           // Number each question's source so the same paper is never added twice, even from another device.
           ready.forEach((it) => { it.note = h.noteFor(it); });
+          // Two questions with the same number (ticked back in by the mentor) get different notes.
+          const notes = new Map();
+          ready.forEach((it) => { const n = notes.get(it.note) || 0; notes.set(it.note, n + 1); if (n) it.note += ' (' + (n + 1) + ')'; });
           const taken = await Api.sourceNotesTaken(ready.map((it) => it.note));
           ready.forEach((it) => { if (it.note && taken.has(it.note)) { it.dup = true; it.include = false; } });
           ready = ready.filter((it) => !it.dup);
@@ -2147,6 +2319,7 @@
         } else if (!found) {
           $('#pdfNote').innerHTML = '<div class="notice warn" style="margin-top:12px">No numbered questions were found. Open “Text read from the PDF” below to see what was read.</div>';
         }
+        await markRepeats(st.parsed);
         review.render();
         if (found) $('#impPreview').scrollIntoView({ behavior: 'smooth' });
       } catch (err) {
@@ -2169,6 +2342,7 @@
         if (st.text === st.pdf.text) { try { await attachFigures(); } catch (e) { console.error(e); } status(st.fileInfo || ''); }
         else toast('You changed the text, so diagrams from the PDF were left out. Add them by editing the questions after saving.');
       }
+      await markRepeats(st.parsed);
       review.render();
       $('#impPreview').scrollIntoView({ behavior: 'smooth' });
     };
@@ -2480,6 +2654,7 @@
       const taken = await Api.sourceNotesTaken(fresh.map((it) => base + ' · Q' + it.num));
       fresh.forEach((it) => { if (taken.has(base + ' · Q' + it.num)) { it.dup = true; it.include = false; } });
     } catch (e) { console.error(e); }
+    await markRepeats(fresh);
     st.parsed = fresh;
   }
 

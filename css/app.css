@@ -502,3 +502,21 @@ ol.opts li img { max-height: 120px; display: block; background: #fff; border-rad
 .sol-head label { font-weight: 600; font-size: .86rem; }
 .sol-head .hint { font-weight: 400; color: var(--muted); font-size: .8rem; }
 .ai-status { font-size: .82rem; color: var(--muted); }
+
+/* Repeated questions */
+.same-cmp { margin-top: 8px; }
+.same-cmp summary { cursor: pointer; font-weight: 600; color: var(--accent); font-size: .86rem; }
+.same-body { margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--line-strong); border-radius: var(--r-sm); }
+.dup-group { margin-bottom: 12px; }
+.dup-copies { display: grid; gap: 10px; margin-top: 10px; }
+@media (min-width: 900px) { .dup-copies.two { grid-template-columns: 1fr 1fr; } }
+.dup-copy { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 12px; cursor: pointer; min-width: 0; }
+.dup-copy:has(input:checked) { border-color: var(--good); box-shadow: inset 0 0 0 1px var(--good); }
+.dup-copy input { margin-top: 4px; flex: 0 0 auto; }
+.dup-copy > div { min-width: 0; flex: 1; }
+.dup-copy .dup-meta { margin-top: 6px; font-size: .8rem; color: var(--muted); }
+.dup-copy .dup-keep { font-size: .78rem; font-weight: 700; color: var(--good); }
+.dup-copy .dup-keep { display: none; }
+.dup-copy:has(input:checked) .dup-keep { display: block; margin-bottom: 4px; }
+/* Long button labels in these panels wrap on phones instead of running off the screen */
+.ai-solve .btn, .dup-group .btn, .ai-flag .btn { white-space: normal; line-height: 1.25; text-align: left; }
