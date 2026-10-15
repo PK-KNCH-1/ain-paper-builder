@@ -11,10 +11,10 @@
   const SOURCES = { own: 'Our own', pyq: 'NEET previous year', book: 'Book', institute: 'Other institute', other: 'Other' };
   const DIFFS = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
   const BANK_CHECKS = { nosol: 'No solution yet', flag: 'AI has a doubt', aians: 'Answer by AI', aisol: 'Solution by AI' };
-  const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--gold)" stroke="var(--gold)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
+  const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--accent)" stroke="var(--accent)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 14;
+  const APP_BUILD = 15;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -48,7 +48,7 @@
     const btn = document.getElementById('themeBtn');
     if (btn) { btn.outerHTML = themeButtonHTML(); bindThemeButton(); }
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', isDark() ? '#071417' : '#0c3139');
+    if (meta) meta.setAttribute('content', isDark() ? '#1b1d28' : '#ffffff');
     document.querySelectorAll('input[name="themeChoice"]').forEach((r) => { r.checked = r.value === themeChoice(); });
   }
   function bindThemeButton() {
