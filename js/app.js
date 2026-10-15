@@ -14,7 +14,7 @@
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--accent)" stroke="var(--accent)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 15;
+  const APP_BUILD = 16;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -48,7 +48,7 @@
     const btn = document.getElementById('themeBtn');
     if (btn) { btn.outerHTML = themeButtonHTML(); bindThemeButton(); }
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', isDark() ? '#1b1d28' : '#ffffff');
+    if (meta) meta.setAttribute('content', isDark() ? '#2b2b2b' : '#ffffff');
     document.querySelectorAll('input[name="themeChoice"]').forEach((r) => { r.checked = r.value === themeChoice(); });
   }
   function bindThemeButton() {
@@ -135,7 +135,7 @@
   function loadingHTML(text) { return '<div class="loading">' + esc(text || 'Loading…') + '</div>'; }
   function setTitle(t) { document.title = (t ? t + ' · ' : '') + 'AIN Paper Builder'; }
   function debounce(fn, ms) { let t; return function () { const a = arguments; clearTimeout(t); t = setTimeout(() => fn.apply(null, a), ms); }; }
-  function chipDiff(d) { return '<span class="chip ' + esc(d) + '">' + esc(DIFFS[d] || d) + '</span>'; }
+  function chipDiff(d) { return '<span class="chip diff-' + esc(d) + '">' + esc(DIFFS[d] || d) + '</span>'; }
   function chipReason(r) {
     const label = { new: 'New', review: 'Revision', early: 'Early repeat' }[r] || r;
     return '<span class="chip ' + esc(r) + '">' + label + '</span>';
