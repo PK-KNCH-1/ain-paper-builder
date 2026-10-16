@@ -14,7 +14,7 @@
   const MARK_SVG = '<svg class="mark" viewBox="0 0 64 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="10" r="6.6"/><circle cx="24" cy="10" r="6.6" fill="var(--accent)" stroke="var(--accent)"/><circle cx="40" cy="10" r="6.6"/><circle cx="56" cy="10" r="6.6"/></g></svg>';
 
   // Bump together with version.json on every deploy. An open tab compares the two and offers a reload when they differ.
-  const APP_BUILD = 16;
+  const APP_BUILD = 17;
   function browserLabel() {
     const ua = navigator.userAgent || '';
     const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
@@ -2637,7 +2637,7 @@
       opts.forEach((o, k) => { if (o.box && !String(o.text || '').trim()) figures.push({ unit: o.unit, box: o.box, assign: k + 1 }); });
       for (const f of figures) Object.assign(f, await aiCrop(st, unitById.get(f.unit), f.box, 0, st.clean), { pad: 0 });
       fresh.push({
-        num: m.num, body: m.body, options: opts.map((o) => o.text), answer: fromKey || m.printed_answer || null, solution: '', warnings,
+        num: m.num, body: m.body, options: opts.map((o) => o.text), answer: fromKey || m.printed_answer || null, solution: m.solution || '', warnings,
         include: !!m.body && m.options.length === 4 && !m.orphan, chapter_id: m.chapter_id || st.chapter_id || '', subject: m.subject,
         difficulty: st.diffMode === 'ai' ? m.difficulty : st.difficulty, qtype: m.qtype, pages: m.pages, figures,
         scan: m.qboxes.length ? m.qboxes : null,
@@ -3106,6 +3106,7 @@
           chapter_id: ch ? ch.id : null, topic: String(q.topic || ''), qtype: QTYPES[q.qtype] ? q.qtype : 'single', difficulty: DIFFS[q.difficulty] ? q.difficulty : 'medium',
           body: String(q.body || ''), options, answer, solution: q.solution ? String(q.solution) : null, images: (q.images || []).slice(),
           source_type: SOURCES[q.source_type] ? q.source_type : setSource, source_note: String(q.source_note || data.title || '').trim() || null, archived: !!q.archived,
+          ai_answer: !!q.ai_answer, ai_solution: !!(q.ai_solution && q.solution),
         },
       };
     });
@@ -3235,13 +3236,14 @@
     if (!isAdmin()) { location.hash = '#/'; return; }
     setTitle('Admin');
     main().innerHTML =
-      '<div class="page-head"><div><h1>Admin</h1><p class="sub">Accounts for your mentors, how papers look, the chapter list, and AI conversion of scanned papers.</p></div></div>' +
-      '<div class="tabs" role="tablist" style="margin:0 0 18px">' + [['people', 'Mentors and admins'], ['settings', 'Paper settings'], ['chapters', 'Chapters'], ['ai', 'AI conversion']].map(([k, l]) => '<button class="tab" data-act="atab" data-k="' + k + '" aria-selected="' + (S.adminTab === k) + '">' + l + '</button>').join('') + '</div>' +
+      '<div class="page-head"><div><h1>Admin</h1><p class="sub">Accounts for your mentors, how papers look, the chapter list, the AI, and a backup of the question bank.</p></div></div>' +
+      '<div class="tabs" role="tablist" style="margin:0 0 18px">' + [['people', 'Mentors and admins'], ['settings', 'Paper settings'], ['chapters', 'Chapters'], ['ai', 'AI conversion'], ['backup', 'Backup']].map(([k, l]) => '<button class="tab" data-act="atab" data-k="' + k + '" aria-selected="' + (S.adminTab === k) + '">' + l + '</button>').join('') + '</div>' +
       '<div id="adminBody">' + loadingHTML() + '</div>';
     S.actions.atab = (b) => { S.adminTab = b.dataset.k; viewAdmin(S.viewToken); };
     if (S.adminTab === 'people') return adminPeople(token);
     if (S.adminTab === 'settings') return adminSettings();
     if (S.adminTab === 'ai') return adminAi(token);
+    if (S.adminTab === 'backup') return adminBackup(token);
     return adminChapters();
   }
 
@@ -3476,6 +3478,80 @@
       busy(btn, true, 'Saving…');
       try { await Api.saveSettings(data); S.settings = data; toast('Saved'); } catch (err) { fail(err); } finally { busy(btn, false); }
     });
+  }
+
+  /* ================= Backup ================= */
+  // The whole question bank as one question file (the same format "Add a question file" reads), pictures included.
+
+  // A stored picture as a data: address in a format the question file accepts (PNG, JPEG or WebP).
+  async function pictureDataUrl(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    let blob = await r.blob();
+    if (!/^image\/(png|jpeg|webp)$/.test(blob.type)) {
+      // SVG, GIF or an unlabelled file: redrawn as PNG.
+      const obj = URL.createObjectURL(blob);
+      try {
+        const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('unreadable')); i.src = obj; });
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth || 600; c.height = img.naturalHeight || 400;
+        const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
+        blob = await new Promise((res) => c.toBlob(res, 'image/png'));
+      } finally { URL.revokeObjectURL(obj); }
+    }
+    return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
+  }
+
+  async function buildBackup(onProgress) {
+    onProgress('Reading the questions…');
+    const rows = await Api.allQuestions();
+    const paths = [...new Set(rows.flatMap((q) => (q.images || []).concat((q.options || []).map((o) => o && o.image).filter(Boolean))))];
+    const urls = paths.length ? await Api.signedUrls(paths) : {};
+    const pics = new Map();
+    let done = 0, missing = 0;
+    const queue = paths.slice();
+    const worker = async () => {
+      while (queue.length) {
+        const p = queue.shift();
+        try { pics.set(p, await pictureDataUrl(urls[p])); } catch (e) { missing++; }
+        done++;
+        if (done % 5 === 0 || done === paths.length) onProgress('Packing pictures: ' + done + ' of ' + paths.length + '…');
+      }
+    };
+    await Promise.all(Array.from({ length: 6 }, worker));
+    const day = new Date().toISOString().slice(0, 10);
+    const data = {
+      format: 'ain-question-set', version: 1, title: orgName() + ' question bank backup, ' + fmtDate(new Date()), source_type: 'other', exported_at: new Date().toISOString(),
+      questions: rows.map((q) => ({
+        subject: (subjectOfChapter(q.chapter_id) || {}).name || '', chapter: chapterName(q.chapter_id), topic: q.topic || '', qtype: q.qtype, difficulty: q.difficulty,
+        body: q.body, options: (q.options || []).map((o) => ({ text: (o && o.text) || '', image: o && o.image ? pics.get(o.image) || null : null })),
+        answer: q.answer, solution: q.solution || null, images: (q.images || []).map((p) => pics.get(p)).filter(Boolean),
+        source_type: q.source_type, source_note: q.source_note || null, archived: !!q.archived, ai_answer: !!q.ai_answer, ai_solution: !!q.ai_solution,
+      })),
+    };
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    return { blob, name: 'ain-question-bank-' + day + '.json', count: rows.length, pictures: paths.length - missing, missing };
+  }
+
+  function adminBackup() {
+    const box = $('#adminBody');
+    box.innerHTML = '<div class="panel"><h2 style="margin-bottom:8px">Download the question bank</h2>' +
+      '<p class="small" style="max-width:70ch">One file with every question: text, options, answer, solution, chapter, source and diagrams, archived questions too. Keep a copy somewhere safe, such as Google Drive or a pen drive, and download a fresh one after adding a lot of questions.</p>' +
+      '<p class="small" style="max-width:70ch;margin-top:8px">To put questions back from it, open Add from PDF → Add a question file and choose the file. Questions already in the bank are skipped. Mentees and their papers are not in this file.</p>' +
+      '<div class="form-actions" style="align-items:center"><button class="btn primary" data-act="backup">Download the question bank</button><span class="muted small" id="bkStatus"></span></div></div>';
+    S.actions.backup = async (b) => {
+      const status = (m) => { const el = $('#bkStatus'); if (el) el.textContent = m; };
+      busy(b, true, 'Preparing…');
+      try {
+        const r = await buildBackup(status);
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(r.blob); a.download = r.name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+        status(r.count + ' question' + (r.count === 1 ? '' : 's') + ' and ' + r.pictures + ' picture' + (r.pictures === 1 ? '' : 's') + ' saved to ' + r.name + ' (' + (r.blob.size < 1048576 ? 'under 1 MB' : Math.round(r.blob.size / 1048576) + ' MB') + ').' + (r.missing ? ' ' + r.missing + ' picture' + (r.missing === 1 ? '' : 's') + ' could not be loaded and ' + (r.missing === 1 ? 'is' : 'are') + ' missing from the file.' : ''));
+      } catch (e) { status(''); fail(e); }
+      finally { busy(b, false); }
+    };
   }
 
   /* ================= Account ================= */

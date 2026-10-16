@@ -877,6 +877,7 @@
 
   // Joins the pages the AI read into whole questions. Questions cut at the bottom of a page or column are joined
   // with their continuation on the next page. pages: [{ unit, label, questions: [server question], answer_key }] in reading order.
+  const SOL_START = /^(?:sol(?:ution)?|explanation|hint)\s*[.:\-]\s*/i;
   function mergeAiPages(pages, opts) {
     const o = opts || {};
     const items = [];
@@ -894,7 +895,13 @@
         const continues = prev && (!q.starts_here || !q.number || (q.number === prev.num && (prev.open || !options.some(hasContent) || !prev.options.some(hasContent))));
         if (continues) {
           const t = String(q.text || '').trim();
-          if (t) {
+          const sol = String(q.solution || '').trim();
+          if (sol) prev.solution = prev.solution ? prev.solution + '\n' + sol : sol;
+          if (t && SOL_START.test(t) && prev.options.some(hasContent)) {
+            // A printed solution carried over to the next page or column.
+            const body = t.replace(SOL_START, '').trim();
+            if (body) prev.solution = prev.solution ? prev.solution + '\n' + body : body;
+          } else if (t) {
             if (prev.options.some(hasContent) && !options.some(hasContent)) {
               // Text after the options have started belongs to the last option.
               const last = prev.options[prev.options.length - 1];
@@ -915,7 +922,7 @@
         }
         prev = {
           num: q.number || null, subject: q.subject || subject, chapter_id: q.chapter_id || null, difficulty: q.difficulty || 'medium', qtype: q.qtype || 'single',
-          body: String(q.text || '').trim(), options, figs, qboxes: qbox, printed_answer: q.printed_answer || 0,
+          body: String(q.text || '').trim(), options, figs, qboxes: qbox, printed_answer: q.printed_answer || 0, solution: String(q.solution || '').trim(),
           pages: [pg.label], open: q.ends_here === false, orphan: !q.starts_here || !q.number,
         };
         items.push(prev);

@@ -203,6 +203,10 @@
     async questionTexts() {
       return fetchAll(() => client().from('questions').select('id, chapter_id, body, options, answer, images, source_note, archived').order('created_at').order('id'));
     },
+    // Every question, archived ones too, in full (for the backup file).
+    async allQuestions() {
+      return fetchAll(() => client().from('questions').select('*').order('created_at').order('id'));
+    },
     // Every question still in use, in full, to look for copies.
     async activeQuestions() {
       return fetchAll(() => client().from('questions').select('*').eq('archived', false).order('created_at').order('id'));
